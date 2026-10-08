@@ -1,0 +1,1257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>FastAPI 后端脚手架拆解</title>
+</head>
+<body>
+<main>
+
+<section class="part" id="p1">
+<h1 class="part-title">第一部分 · 全局视角</h1>
+
+<h2 id="ch1">1. 这个后端在解决什么问题</h2>
+
+<p>一句话：它是一个<strong>知识库服务的骨架</strong>——把文档收进来、存起来、检索出去。技术选型已经替你把「存哪儿、怎么异步、怎么迁移」这些决定做完了。</p>
+
+<div class="tw"><table>
+<thead><tr><th>关注点</th><th>选型</th><th>为什么是它</th></tr></thead>
+<tbody>
+<tr><td>Web 框架</td><td>FastAPI</td><td>原生 async + Pydantic 校验 + 自动生成 OpenAPI 文档</td></tr>
+<tr><td>ASGI 服务器</td><td>uvicorn[standard]</td><td>FastAPI 只定义接口，真正监听端口、解析 HTTP 的是它</td></tr>
+<tr><td>ORM</td><td>SQLAlchemy 2.0（async）</td><td>2.0 风格：类型注解驱动，<code>select()</code> 取代旧的 <code>Query</code></td></tr>
+<tr><td>数据库驱动</td><td>asyncpg</td><td>PostgreSQL 的异步驱动，不占线程池</td></tr>
+<tr><td>迁移</td><td>Alembic</td><td>SQLAlchemy 官方配套，支持 async</td></tr>
+<tr><td>配置</td><td>pydantic-settings</td><td>把环境变量变成有类型、可校验的对象</td></tr>
+<tr><td>数据库</td><td>PostgreSQL + pgvector</td><td>pgvector 提供向量类型与索引，为 RAG 检索预留</td></tr>
+<tr><td>对象存储</td><td>腾讯云 COS</td><td>原始 PDF / 文档不进数据库</td></tr>
+<tr><td>依赖管理</td><td>uv</td><td>锁文件 + 极快的解析，见第 15 章那个坑</td></tr>
+</tbody>
+</table></div>
+
+<blockquote>
+<p><strong>关键的架构取舍：文件进 COS，元数据进 PG，向量进 pgvector。</strong>这三条数据线决定了后面所有的分层方式。</p>
+<p>需要如实说明的一点：<code>docker-compose.yml</code> 起的是 <code>pgvector/pgvector:pg16</code> 镜像，说明<strong>计划</strong>把向量放在这里，但代码里还没有任何模型或索引落地。目前只是选型就位。</p>
+</blockquote>
+
+<h2 id="ch2">2. 目录结构与依赖方向</h2>
+
+<pre><code>backend/
+├── pyproject.toml          # 依赖清单（uv 管理）
+├── uv.lock                 # 锁定的完整依赖树
+├── .python-version         # 3.10
+├── alembic.ini             # 迁移工具配置
+├── alembic/
+│   ├── env.py              # 迁移的执行入口，定义「怎么连库」
+│   └── versions/           # 每次迁移一个文件（目前为空）
+└── app/
+    ├── main.py             # 应用装配
+    ├── core/               # 与业务无关的地基
+    │   ├── config.py       # 配置
+    │   ├── logging.py      # 日志
+    │   └── exceptions.py   # 异常定义
+    ├── db/                 # 数据访问底座
+    │   ├── base.py         # ORM 基类
+    │   └── session.py      # 引擎与会话
+    ├── api/                # HTTP 接口层
+    │   ├── deps.py         # 依赖注入
+    │   ├── error_handlers.py
+    │   └── routes/health.py
+    └── storage/            # 外部对象存储
+        └── cos_client.py</code></pre>
+
+<p><strong>依赖方向的铁律：<code>api → db / storage → core</code>，<code>core</code> 绝不反向 import 任何上层。</strong></p>
+
+<p>为什么这条线重要：如果 <code>core/config.py</code> 里 import 了 <code>api</code> 里的东西，就形成循环依赖，而且 <code>core</code> 再也没法脱离 Web 框架单独测试。</p>
+
+<p>怎么验证方向没写错——<strong>能不能在完全不加载 Web 框架的情况下 import 地基？</strong></p>
+
+<pre><code>cd backend
+uv run python -c "from app.core import config; print(config.settings.app_name)"</code></pre>
+
+<p>这条命令能跑通，就说明 <code>core</code> 是干净的。跑不通（比如报要 fastapi）就说明地基里混进了上层依赖。</p>
+
+<h2 id="ch3">3. 一次请求的完整旅程</h2>
+
+<p>以 <code>GET /api/health/db</code> 为例，从网卡到响应的完整链路：</p>
+
+<pre><code>浏览器
+  │  HTTP/1.1  GET /api/health/db
+  ▼
+uvicorn（ASGI 服务器，监听 127.0.0.1:8000）
+  │  把原始 socket 字节解析成 ASGI 的 scope + receive/send 可调用对象
+  ▼
+Starlette 路由匹配（FastAPI 构建在 Starlette 之上）
+  │  逐层匹配：外层 prefix="/api" + router.prefix="/health" + path="/db"
+  ▼
+依赖解析：函数签名里写了 session: DbSession
+  │  = Annotated[AsyncSession, Depends(get_session)] → 调用 get_session()
+  ▼
+get_session() 进入 async with AsyncSessionLocal() as session
+  │  执行到 yield session → 把 session 交给路由函数
+  ▼
+health_db(session) 执行 await session.execute(text("SELECT 1"))
+  ▼
+返回 HealthStatus 对象 → 按 response_model 校验 → 序列化成 JSON
+  ▼
+get_session() 的收尾：async with 退出 → session.close() → 连接归还连接池
+  ▼
+uvicorn 把 JSON 字节写回 socket</code></pre>
+
+<p>这张图里<strong>最容易被忽略的是倒数第二步</strong>：<code>get_session</code> 是「生成器依赖」，FastAPI 会在响应发出<em>之后</em>才回到 <code>yield</code> 下面继续执行。这保证了「一个请求一个 session，用完必定归还」——哪怕路由函数中途抛异常也一样，因为 <code>async with</code> 有 finally 语义。</p>
+
+<h2 id="ch4">4. 启动链：app 实例是怎么诞生的</h2>
+
+<pre><code class="language-python"># app/main.py
+def create_app() -&gt; FastAPI:
+    configure_logging()
+    logger = get_logger(__name__)
+
+    app = FastAPI(title=settings.app_name)
+    app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, ...)
+    register_exception_handlers(app)
+    app.include_router(health.router, prefix="/api")
+
+    logger.info("app initialized with settings: %s", settings.app_name)
+    return app
+
+app = create_app()</code></pre>
+
+<p>当你敲 <code>uv run uvicorn app.main:app</code> 时，uvicorn 实际做了三件事：</p>
+
+<ol>
+<li><strong>import <code>app.main</code> 模块</strong>——模块级代码被执行，于是最后那行 <code>app = create_app()</code> 跑完</li>
+<li><strong>取模块里的 <code>app</code> 属性</strong>——这就是 <code>app.main:app</code> 里冒号的含义：<code>模块路径:变量名</code></li>
+<li><strong>把它当 ASGI 应用</strong>，开始 listen 端口</li>
+</ol>
+
+<p>所以「<code>app.main:app</code> 里的 app 是什么」是个很实在的问题：它是<strong>模块被 import 时的副作用产物</strong>，不是 uvicorn 构造的。</p>
+
+<h3 id="ch4-1">为什么用工厂函数，而不是直接 <code>app = FastAPI()</code></h3>
+
+<div class="tw"><table>
+<thead><tr><th>收益</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>可测性</td><td><code>create_app()</code> 每次返回全新实例，测试之间互不污染</td></tr>
+<tr><td>可注入</td><td>可以在建实例时换上测试库的连接串、关掉 CORS</td></tr>
+<tr><td>副作用集中</td><td>日志、中间件、异常处理器、路由都在这一个函数里，读一遍就知道应用长什么样</td></tr>
+</tbody>
+</table></div>
+
+<p>同一个思路也用在 <code>get_settings()</code> 上的 <code>@lru_cache</code>：生产环境要单例（避免两份配置不一致），测试环境要能重置。</p>
+
+<blockquote>
+<p><strong>注意一个容易踩的细节</strong>：<code>get_settings.cache_clear()</code> 只影响<em>后续</em>的 <code>get_settings()</code> 调用。已经执行过 <code>from app.core.config import settings</code> 的模块，手里那份引用<strong>不会变</strong>。</p>
+<p>所以测试里换配置，更可靠的做法是依赖注入（<code>app.dependency_overrides</code>），而不是清缓存。</p>
+</blockquote>
+
+</section>
+
+<section class="part" id="p2">
+<h1 class="part-title">第二部分 · 逐层拆解</h1>
+
+<h2 id="ch5">5. core/config.py —— 配置中心</h2>
+
+<p><strong>它干什么</strong>：把散在环境变量和 <code>.env</code> 文件里的字符串，变成一个<strong>有类型、有默认值、能被 IDE 补全</strong>的 Python 对象。</p>
+
+<pre><code class="language-python">PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+    app_name: str = "rag-knowledge-base"
+    log_level: str = "INFO"
+    database_url: str = "postgresql+asyncpg://rag:rag@localhost:5432/rag_kb"
+    cors_origins: str = "http://localhost:5173"</code></pre>
+
+<p>逐行拆开看：</p>
+
+<div class="tw"><table>
+<thead><tr><th>代码</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><code>BaseSettings</code></td><td>pydantic 的子类，会自动去读环境变量并做类型转换</td></tr>
+<tr><td><code>env_file=PROJECT_ROOT/".env"</code></td><td>声明 <code>.env</code> 的位置</td></tr>
+<tr><td><code>extra="ignore"</code></td><td><code>.env</code> 里有不认识的变量时<strong>忽略而不是报错</strong>。这点很关键——否则 docker-compose 里多塞一个变量，后端起不来</td></tr>
+<tr><td><code>case_sensitive=False</code></td><td><code>DATABASE_URL</code> 和 <code>database_url</code> 都能匹配</td></tr>
+<tr><td><code>app_name: str = "..."</code></td><td>既声明类型又给默认值。字段名转成大写就是环境变量名</td></tr>
+</tbody>
+</table></div>
+
+<h3 id="ch5-1"><code>parents[3]</code> 是怎么算出来的</h3>
+
+<pre><code>__file__      = /Users/…/agentic_rag-1/backend/app/core/config.py
+parents[0]    = /Users/…/agentic_rag-1/backend/app/core
+parents[1]    = /Users/…/agentic_rag-1/backend/app
+parents[2]    = /Users/…/agentic_rag-1/backend        ← 有些项目选这一层
+parents[3]    = /Users/…/agentic_rag-1               ← 本项目选的是仓库根</code></pre>
+
+<p><strong>这里已经埋了一个坑</strong>：仓库根下<strong>现在没有 <code>.env</code> 文件</strong>。而 pydantic-settings 的 <code>env_file</code> 指向不存在的文件时<strong>不报错</strong>，直接使用字段默认值。</p>
+
+<p>也就是说：你现在跑的是源码里写死的默认值——包括那两个腾讯云 COS 密钥。</p>
+
+<blockquote>
+<p><strong>该做的三件事</strong>：建 <code>.env</code>、把密钥移进去、把 <code>.env</code> 写进 <code>.gitignore</code>。</p>
+<p>而且必须<strong>顺带删掉 <code>config.py</code> 里的明文默认值</strong>——否则「移走」是假的，密钥还在源码里躺着。可以改成空字符串，让 <code>cos_configured</code> 自然变成 <code>False</code>。</p>
+</blockquote>
+
+<h3 id="ch5-2"><code>@property</code>：派生配置</h3>
+
+<pre><code class="language-python">@property
+def cos_configured(self) -&gt; bool:
+    return bool(self.cos_secret_id and self.cos_secret_key and self.cos_bucket)
+
+@property
+def cors_origin_list(self) -&gt; list[str]:
+    return [o.strip() for o in self.cors_origins.split(",") if o.strip()]</code></pre>
+
+<p><code>@property</code> 是<strong>计算属性</strong>：不占存储、每次访问时现算、只读。这里用了两次，各有理由。</p>
+
+<p><strong><code>cos_configured</code></strong> 把「三个字段是否都非空」这个判断<em>收敛到一处</em>。调用方只写 <code>if not settings.cos_configured</code>，不用三处重复写 <code>and</code> 链。以后加第四个字段，也只改一个地方。</p>
+
+<p><strong><code>cors_origin_list</code></strong> 解决的是「书写习惯」与「API 要求」的错位：<code>.env</code> 里一行写 <code>CORS_ORIGINS=http://a.com,http://b.com</code> 最自然，但 FastAPI 的 <code>allow_origins</code> 要的是 <code>list[str]</code>。这个 property 就是那个转换器。</p>
+
+<blockquote>
+<p><strong>这里有个真实存在的类型标注问题</strong>：<code>cors_origins</code> 被标成了 <code>list[str]</code>，但它的实际值是字符串，后面还调了 <code>.split(",")</code>。</p>
+<p>现在靠默认值是字符串所以能跑。但哪天你在 <code>.env</code> 里写 <code>CORS_ORIGINS=["a","b"]</code>，pydantic 会真的给你一个 list，<code>.split</code> 立刻炸。类型注解应该改成 <code>str</code>。</p>
+</blockquote>
+
+<h3 id="ch5-3"><code>lru_cache</code> 单例</h3>
+
+<pre><code class="language-python">@lru_cache(maxsize=1)
+def get_settings() -&gt; Settings:
+    return Settings()
+
+settings = get_settings()</code></pre>
+
+<p><code>lru_cache(maxsize=1)</code> 表示「第一次调用后把结果缓存起来，之后直接返回同一个对象」。</p>
+
+<p><strong>为什么需要它</strong>：<code>Settings()</code> 每次构造都要读文件、逐字段解析、跑校验。如果每个模块 import 时都 new 一个，一是重复开销，二是<strong>可能得到两份状态不一致的配置</strong>（比如中途 <code>.env</code> 被改了）。</p>
+
+<p><code>settings = get_settings()</code> 是模块级实例，别人 <code>from app.core.config import settings</code> 拿到的是<strong>同一个对象</strong>。</p>
+
+<h2 id="ch6">6. core/logging.py —— 统一日志</h2>
+
+<p><strong>它干什么</strong>：让全项目所有模块用同一套格式、同一个级别、同一个输出口，并且<strong>接管 uvicorn 自带的日志配置</strong>。</p>
+
+<pre><code class="language-python">_LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+_configured = False
+
+def configure_logging() -&gt; None:
+    global _configured
+    if _configured:
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(fmt=_LOG_FORMAT, datefmt=_DATE_FORMAT))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(settings.log_level.upper())
+
+    for noisy in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(noisy).handlers.clear()
+        logging.getLogger(noisy).propagate = True
+
+    _configured = True
+
+def get_logger(name: str) -&gt; logging.Logger:
+    return logging.getLogger(name)</code></pre>
+
+<p>四个设计点，每个都对应一个真实问题：</p>
+
+<div class="tw"><table>
+<thead><tr><th>设计</th><th>不这么做会怎样</th></tr></thead>
+<tbody>
+<tr><td><code>_configured</code> 幂等闸</td><td>测试里连续建 10 个 app 就挂 10 个 handler，<strong>每条日志打印 10 遍</strong></td></tr>
+<tr><td><code>root.handlers.clear()</code></td><td>保证「只此一个」输出口，避免重复打印</td></tr>
+<tr><td>接管 uvicorn 三个 logger</td><td>uvicorn 启动时自带一套 handler，会导致 access log 和业务日志格式不一致</td></tr>
+<tr><td>输出到 <code>sys.stdout</code></td><td>12-factor 惯例：日志不自己管文件轮转，交给容器 / 系统采集</td></tr>
+</tbody>
+</table></div>
+
+<h3 id="ch6-1"><code>get_logger</code> 为什么还要包一层</h3>
+
+<p>现在看它就是 <code>logging.getLogger</code> 的别名，像是多余。但这是<strong>留接口</strong>：日后要换成 structlog、要注入 trace_id、要加敏感信息脱敏过滤器时，只要改这一个函数，全项目几十个调用点不用动。</p>
+
+<p>这是个很划算的薄封装——成本三行，收益是「未来某天的一次重构不用全项目替换」。</p>
+
+<h2 id="ch7">7. core/exceptions.py + api/error_handlers.py —— 异常体系</h2>
+
+<p>这两个文件是一对：<strong>一个定义「错什么」，一个负责「怎么告诉客户端」</strong>。</p>
+
+<pre><code class="language-python"># core/exceptions.py
+class AppException(Exception):
+    code: str = "internal_error"
+    message: str = "服务器内部错误"
+    http_status: int = HTTPStatus.INTERNAL_SERVER_ERROR
+
+    def __init__(self, message: str | None = None, *, code: str | None = None) -&gt; None:
+        if message is not None:
+            self.message = message
+        if code is not None:
+            self.code = code
+        super().__init__(self.message)
+
+class NotFoundException(AppException):
+    code: str = "not_found"
+    message: str = "资源未找到"
+    http_status: int = HTTPStatus.NOT_FOUND</code></pre>
+
+<p>这个写法有四层讲究：</p>
+
+<ol>
+<li><strong>用类属性承载默认值</strong>。<code>NotFoundException</code> 只声明三个类属性就完成定制，子类完全不用写 <code>__init__</code>。这是声明式写法，比每个子类重复一遍构造参数干净得多。</li>
+<li><strong>用 <code>if message is not None</code> 而不是 <code>self.message = message or self.message</code></strong>。因为空字符串 <code>""</code> 是合法输入，用 <code>or</code> 会被当成 falsy 吞掉。这个细节很多人写错。</li>
+<li><strong><code>super().__init__(self.message)</code></strong>。让 <code>str(exc)</code> 有内容，否则 <code>logger.exception</code> 打出来是空白。</li>
+<li><strong>单独一个 <code>*</code> 强制关键字传参</strong>。<code>NotFoundException("找不到")</code> 可以，但 <code>NotFoundException("x", "code")</code> 会报错——防止位置参数传错顺序。</li>
+</ol>
+
+<pre><code class="language-python"># api/error_handlers.py
+async def _app_exception_handler(_: Request, exc: AppException) -&gt; JSONResponse:
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={"code": exc.code, "message": exc.message},
+    )
+
+async def _unhandeled_exception_handler(request: Request, exc: Exception) -&gt; JSONResponse:
+    logger.exception("unhandled_exception at %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"code": "internal_error", "message": "服务器内部错误"},
+    )
+
+def register_exception_handlers(app: FastAPI) -&gt; None:
+    app.add_exception_handler(AppException, _app_exception_handler)
+    app.add_exception_handler(Exception, _unhandeled_exception_handler)</code></pre>
+
+<p>三个要点：</p>
+
+<p><strong>① 两个 handler 有明确分工。</strong><code>AppException</code> 是「预料之内的错误」——业务代码主动抛，信息可以直接给用户看。<code>Exception</code> 是兜底的——<strong>绝不能把原始异常信息吐给客户端</strong>（可能含 SQL 语句、文件路径、连接串），只记日志、返回统一话术。</p>
+
+<p><strong>② 兜底 handler 必须有。</strong>没有它，任何未捕获异常都会让客户端收到 uvicorn 的纯文本 traceback——既是信息泄露，前端也无法统一处理。</p>
+
+<p><strong>③ 注册顺序无关。</strong><code>add_exception_handler</code> 是按类型精确匹配的，不是「先注册先命中」。Starlette 会沿异常的 MRO 往上找注册过的 handler，所以 <code>NotFoundException</code> 自然命中 <code>AppException</code> 那一条。</p>
+
+<blockquote>
+<p><strong>实测踩到的坑</strong>：这个文件里定义的函数叫 <code>register_exception_handlers</code>，但 <code>main.py</code> 里曾经调用的是 <code>register_error_handlers</code>——少了一个 <code>exception</code> 词。直接 <code>AttributeError</code>。</p>
+<p>这类「名字对不上」是新手最高频的错误类型，而且纯字符串层面，IDE 不一定提示。防御手段见第 15 章第 ③ 条。</p>
+</blockquote>
+
+<h2 id="ch8">8. db/base.py + db/session.py —— 数据访问底座</h2>
+
+<h3 id="ch8-1">base.py：三行，但它是整个 ORM 的锚点</h3>
+
+<pre><code class="language-python">class Base(DeclarativeBase):
+    pass</code></pre>
+
+<p>所有模型都会写成 <code>class Document(Base)</code>。对比 SQLAlchemy 1.x：</p>
+
+<div class="tw"><table>
+<thead><tr><th>版本</th><th>写法</th><th>差别</th></tr></thead>
+<tbody>
+<tr><td>1.x</td><td><code>Base = declarative_base()</code></td><td>函数返回动态生成的类，类型检查器看不懂</td></tr>
+<tr><td>2.0</td><td><code>class Base(DeclarativeBase)</code></td><td>真正的类，IDE 能补全 <code>Base.metadata</code>，mypy 能检查</td></tr>
+</tbody>
+</table></div>
+
+<h3 id="ch8-2">session.py：引擎与会话</h3>
+
+<pre><code class="language-python">engine: AsyncEngine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    pool_pre_ping=True,
+)
+
+AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
+    bind=engine,
+    expire_on_commit=False,
+    autoflush=False,
+)
+
+async def get_session() -&gt; AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
+        yield session</code></pre>
+
+<p><strong>这些参数不是抄来的，每个都有理由：</strong></p>
+
+<div class="tw"><table>
+<thead><tr><th>参数</th><th>作用</th><th>不设会怎样</th></tr></thead>
+<tbody>
+<tr><td><code>pool_pre_ping=True</code></td><td>从池里取连接前先 ping 一次，断了就换一条</td><td>数据库重启或网络抖动后，前几个请求全报 connection closed</td></tr>
+<tr><td><code>echo=False</code></td><td>不打印每条 SQL</td><td>生产日志被 SQL 淹没</td></tr>
+<tr><td><code>expire_on_commit=False</code></td><td>commit 后不把对象字段标记为过期</td><td>commit 后再读属性会触发新的 SELECT（隐性 N+1），异步下还可能报 <code>MissingGreenlet</code></td></tr>
+<tr><td><code>autoflush=False</code></td><td>查询前不自动 flush</td><td>出现难以预测的隐式 INSERT，调试很痛苦</td></tr>
+</tbody>
+</table></div>
+
+<p><strong><code>get_session</code> 的三个层次：</strong></p>
+
+<ol>
+<li><code>async with</code> 保证<strong>无论正常返回还是抛异常，session 一定会关闭</strong>。注意这里归还的是「连接池里的连接」，不是关掉 TCP。</li>
+<li><code>yield</code> 把它变成 FastAPI 的<strong>生成器依赖</strong>——请求进来前执行 <code>yield</code> 之前，响应发出后执行 <code>yield</code> 之后。</li>
+<li><code>AsyncGenerator[AsyncSession, None]</code> 的类型注解，让 <code>DbSession</code> 那个 <code>Annotated</code> 能推导出正确类型。</li>
+</ol>
+
+<blockquote>
+<p><strong><code>expire_on_commit=False</code> 的代价要知道</strong>：commit 之后对象里的数据是<em>快照</em>，不再自动从库刷新。如果你依赖「commit 后重新读能拿到数据库算出来的值」（比如触发器改的字段、自增主键），需要手动 <code>await session.refresh(obj)</code>。</p>
+</blockquote>
+
+<h3 id="ch8-3"><code>+asyncpg</code> 这个后缀不能少</h3>
+
+<p><code>database_url</code> 写的是 <code>postgresql+asyncpg://…</code>。这个 <code>+asyncpg</code> 决定用哪个驱动：</p>
+
+<div class="tw"><table>
+<thead><tr><th>URL 形式</th><th>驱动</th><th>行为</th></tr></thead>
+<tbody>
+<tr><td><code>postgresql://</code></td><td>psycopg2</td><td>同步，会阻塞事件循环</td></tr>
+<tr><td><code>postgresql+asyncpg://</code></td><td>asyncpg</td><td>异步，原生协程</td></tr>
+</tbody>
+</table></div>
+
+<p>好消息是这里不会静默出错：<code>create_async_engine</code> 拿到非异步驱动会<strong>在启动时直接报错</strong>（要求使用 async driver）。属于「早失败」的设计，比悄悄退化成同步阻塞好得多。</p>
+
+<h2 id="ch9">9. api/deps.py —— 依赖注入</h2>
+
+<p>整个文件只有一行：</p>
+
+<pre><code class="language-python">DbSession = Annotated[AsyncSession, Depends(get_session)]</code></pre>
+
+<p>但它把三层东西缝在了一起。用起来是这样：</p>
+
+<pre><code class="language-python">@router.get("/db")
+async def health_db(session: DbSession) -&gt; HealthStatus:
+    ...</code></pre>
+
+<p>FastAPI 看到参数类型标注里藏着 <code>Depends(get_session)</code>，就会自动：</p>
+
+<ol>
+<li>调用 <code>get_session()</code> 拿到生成器</li>
+<li>进场（执行到 <code>yield</code>），把 yield 出来的 <code>AsyncSession</code> 塞进参数</li>
+<li>函数执行完，退场（继续执行 <code>yield</code> 之后的清理代码）</li>
+</ol>
+
+<p><strong>为什么值得为这一行单独建个文件：</strong></p>
+
+<div class="tw"><table>
+<thead><tr><th>收益</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>函数签名即声明</td><td>路由函数不需要知道 session 从哪来，只声明「我需要一个 session」</td></tr>
+<tr><td>可整体替换</td><td>测试时 <code>app.dependency_overrides[get_session] = fake</code>，一行换掉真实数据库，不用动任何路由代码</td></tr>
+<tr><td>避免重复</td><td>不用在每个路由上写 <code>session: AsyncSession = Depends(get_session)</code></td></tr>
+</tbody>
+</table></div>
+
+<p><strong><code>Annotated</code> 的价值</strong>：把「类型」和「注入指令」合并到一个名字里。没有它就得写 <code>session: AsyncSession = Depends(get_session)</code>——默认值的位置被占用了，这个参数就再也没法有别的默认值，而且每个调用点都要重复写一遍完整表达式。</p>
+
+<p>更本质地说，<strong>这是「依赖倒置」的落点</strong>：路由依赖抽象（<code>DbSession</code> 这个名字），不依赖具体构造方式。</p>
+
+<blockquote>
+<p>这正是 FastAPI 相对 Flask 最大的体验差异。Flask 里你会写 <code>g.db = connect()</code> 或者用 <code>before_request</code> 钩子，靠<strong>约定和全局变量</strong>传递资源；FastAPI 靠<strong>函数签名</strong>显式声明。后者的可测试性高一个量级。</p>
+</blockquote>
+
+<h2 id="ch10">10. storage/cos_client.py —— 外部服务封装</h2>
+
+<p><strong>它干什么</strong>：把腾讯云 COS 的 SDK 包成「符合本项目口味的对象」，让业务代码见不到 SDK 细节。</p>
+
+<pre><code class="language-python">class CosClient:
+    def __init__(self) -&gt; None:
+        if not settings.cos_configured:
+            raise ConfigurationError("腾讯云COS未配置")
+        config = CosConfig(Region=settings.cos_region,
+                           SecretId=settings.cos_secret_id,
+                           SecretKey=settings.cos_secret_key)
+        self.client = CosS3Client(config)
+        self.bucket = settings.cos_bucket
+
+    async def ping(self) -&gt; bool:
+        loop = asyncio.get_event_loop()
+        try:
+            await asyncio.to_thread(self.client.head_bucket, Bucket=self.bucket)
+            return True
+        except (CosServiceError, CosClientError) as exc:
+            logger.warning("COS ping failed: %s", exc)
+            return False
+
+_cos_client: CosClient | None = None
+
+def get_cos_client() -&gt; CosClient:
+    global _cos_client
+    if _cos_client is None:
+        _cos_client = CosClient()
+    return _cos_client</code></pre>
+
+<p>三个关键决策，都值得理解：</p>
+
+<h3 id="ch10-1">① 为什么必须 <code>asyncio.to_thread</code></h3>
+
+<p>腾讯云 SDK 是<strong>同步</strong>的——<code>head_bucket</code> 内部走 <code>requests</code>，会阻塞当前线程。在 async 函数里直接调用它，会<strong>卡住整个事件循环</strong>，同一进程里所有并发请求一起等。</p>
+
+<p><code>asyncio.to_thread</code> 把它扔进线程池执行，事件循环继续接别的活。</p>
+
+<blockquote>
+<p>这是异步项目接同步 SDK 的<strong>通用解药</strong>。任何「async 函数里调同步阻塞库」的地方都要这么处理——pymysql、boto3、requests、PIL 全都算。</p>
+</blockquote>
+
+<h3 id="ch10-2">② 懒加载 + 模块级单例</h3>
+
+<p><code>_cos_client</code> 是模块级私有变量，<code>get_cos_client()</code> 第一次被调用时才真正构造。</p>
+
+<p>好处是：<strong>进程启动时不连 COS</strong>。如果密钥填错或网络不通，服务照样能起来，只是 <code>/health/cos</code> 报 error——而不是整个后端起不来。</p>
+
+<p>这体现了一条运维原则：<strong>依赖的失败不应该阻止进程启动</strong>。否则一个次要依赖抖动就会引发服务雪崩。</p>
+
+<h3 id="ch10-3">③ 抛 <code>ConfigurationError</code> 而不是 <code>RuntimeError</code></h3>
+
+<p>构造失败时抛的是项目自己的异常类型，它会被全局 handler 转换成 <code>503 + {"code":"configuration_error"}</code>，前端能识别并给出准确提示。抛裸的 <code>RuntimeError</code> 就只能落进 500 兜底，前端只知道「服务器错误」。</p>
+
+<h2 id="ch11">11. api/routes/health.py —— 路由与探活</h2>
+
+<pre><code class="language-python">router = APIRouter(prefix="/health", tags=["health"])
+
+HealthStatusValue = Literal["ok", "error", "not_configured"]
+
+class HealthStatus(BaseModel):
+    status: HealthStatusValue
+    detail: str | None = None
+
+@router.get("", response_model=HealthStatus, operation_id="health_check", summary="健康检查")
+async def health() -&gt; HealthStatus:
+    return HealthStatus(status="ok", detail="服务运行正常")
+
+@router.get("/db", response_model=HealthStatus, operation_id="health_check_db")
+async def health_db(session: DbSession) -&gt; HealthStatus:
+    try:
+        result = await session.execute(text("SELECT 1"))
+        result.scalar_one()
+        return HealthStatus(status="ok", detail="数据库连接正常")
+    except Exception as e:
+        logger.exception("数据库健康检查失败")
+        return HealthStatus(status="error", detail=str(e))</code></pre>
+
+<h3 id="ch11-1">路径是怎么拼出来的</h3>
+
+<p><code>main.py</code> 里写了 <code>app.include_router(health.router, prefix="/api")</code>，路由文件里又写了 <code>APIRouter(prefix="/health")</code>，加上 <code>@router.get("/db")</code>——</p>
+
+<pre><code>"/api"  +  "/health"  +  "/db"   =   GET /api/health/db</code></pre>
+
+<p>三层拼一层。<strong>很多人找不到路由就栽在这里</strong>：只看了路由文件，忘了 <code>include_router</code> 那层还加了前缀。</p>
+
+<blockquote>
+<p><strong><code>""</code> 和 <code>"/"</code> 的区别</strong>：<code>@router.get("")</code> 配 <code>prefix="/health"</code> 得到 <code>/api/health</code>；写成 <code>@router.get("/")</code> 会得到 <code>/api/health/</code>——<strong>带尾斜杠</strong>。FastAPI 会对不匹配的那个发 307 重定向，而前端 <code>fetch</code> 遇到重定向有时会丢掉请求体。这是个能坑半天的细节。</p>
+</blockquote>
+
+<h3 id="ch11-2">探针的层次感（这个文件最有价值的设计）</h3>
+
+<div class="tw"><table>
+<thead><tr><th>端点</th><th>探什么</th><th>它挂了意味着</th></tr></thead>
+<tbody>
+<tr><td><code>GET /api/health</code></td><td>进程活着、能返回响应</td><td>进程死了，或端口不通</td></tr>
+<tr><td><code>GET /api/health/db</code></td><td>真发一条 <code>SELECT 1</code></td><td>数据库不可用，或连接串配错</td></tr>
+<tr><td><code>GET /api/health/cos</code></td><td>真做一次 <code>head_bucket</code></td><td>COS 密钥错 / 桶不存在 / 网络不通</td></tr>
+</tbody>
+</table></div>
+
+<p>关键区别：<code>/health</code> 只证明「Web 层活着」，<strong>它不碰任何外部依赖</strong>。所以正确的用法是——</p>
+
+<ul>
+<li><strong>liveness probe 挂 <code>/health</code></strong>：别让数据库抖动把好 Pod 杀掉重启</li>
+<li><strong>readiness probe 挂 <code>/health/db</code></strong>：依赖没好就不接流量</li>
+</ul>
+
+<p>这是探针设计的基本功。把两者混成一个端点，会导致「数据库慢 → Pod 被判定死亡 → 重启 → 数据库更慢」的死亡螺旋。</p>
+
+<h3 id="ch11-3"><code>response_model</code> + <code>Literal</code> 的配合</h3>
+
+<p><code>Literal["ok", "error", "not_configured"]</code> 把状态值<strong>限死在三个</strong>，收益是双向的：</p>
+
+<ul>
+<li>写代码时 <code>HealthStatus(status="okay")</code> 会被 IDE 直接标红</li>
+<li><code>/docs</code> 里这个字段会渲染成<strong>下拉枚举</strong>，而不是自由文本输入框</li>
+</ul>
+
+<h3 id="ch11-4">为什么健康检查内部吞异常、返回 200 + status=error</h3>
+
+<p>不抛异常是有意的：<strong>HTTP 200 表示「检查执行了」，body 里的 <code>status</code> 才表示「结果好不好」</strong>。如果抛异常变成 503，监控系统就得分两个地方（状态码 + body）才能区分「服务挂了」和「数据库挂了」。</p>
+
+<blockquote>
+<p>但也存在另一派做法：探针直接返回 503，让负载均衡器不用解析 body 就能摘流量。<strong>两种都对，关键是团队内要统一</strong>，别一半一半。</p>
+<p><strong>另一个要注意的点</strong>：<code>detail=str(e)</code> 会把原始异常信息暴露给调用方。如果 <code>/docs</code> 只在内网开放，无所谓；如果对公网可达，这里可能泄露连接串。生产环境建议把 detail 收敛成固定的分类文案。</p>
+</blockquote>
+
+</section>
+
+<section class="part" id="p3">
+<h1 class="part-title">第三部分 · 迁移与工程化</h1>
+
+<h2 id="ch12">12. Alembic —— 数据库版本控制</h2>
+
+<p><strong>它解决什么问题</strong>：数据库表结构一定会变。你需要一套「可回滚、可审计、能同步到所有环境」的机制。手写 <code>ALTER TABLE</code> 并记在文档里，三个月后必然对不上。</p>
+
+<h3 id="ch12-1">三个核心概念</h3>
+
+<div class="tw"><table>
+<thead><tr><th>概念</th><th>是什么</th></tr></thead>
+<tbody>
+<tr><td><code>alembic.ini</code></td><td>配置文件，主要告诉它脚本目录在哪</td></tr>
+<tr><td><code>alembic/env.py</code></td><td><strong>迁移的执行入口</strong>——定义「怎么连数据库」和「表结构从哪来」</td></tr>
+<tr><td><code>alembic/versions/*.py</code></td><td>每个迁移一个文件，含 <code>upgrade()</code> 和 <code>downgrade()</code></td></tr>
+</tbody>
+</table></div>
+
+<h3 id="ch12-2">env.py 里真正重要的只有两行</h3>
+
+<pre><code class="language-python">config.set_main_option("sqlalchemy.url", settings.database_url)
+target_metadata = Base.metadata</code></pre>
+
+<p><strong>第一行</strong>：把连接串从 <code>Settings</code> 取过来，覆盖 <code>alembic.ini</code> 里的。这样<strong>数据库地址只有一个来源</strong>（<code>.env</code>），不会出现「应用连 A 库、迁移改 B 库」的事故。</p>
+
+<p><code>alembic.ini</code> 里那行 <code>sqlalchemy.url = driver://user:pass@localhost/dbname</code> 就是个占位符，不用管它。</p>
+
+<p><strong>第二行</strong>：<code>target_metadata</code> 是 <code>--autogenerate</code> 的<strong>对照基准</strong>。Alembic 会拿它和真实数据库的 schema 做 diff，自动生成迁移脚本。</p>
+
+<blockquote>
+<p><strong>由此产生一条硬依赖</strong>：必须让 <code>env.py</code> <strong>import 到所有模型</strong>。否则 <code>Base.metadata</code> 里没有你的表，<code>--autogenerate</code> 会生成一个「删掉所有表」的脚本——<strong>这是 Alembic 最危险的事故</strong>。</p>
+</blockquote>
+
+<p>标准做法是在 <code>app/db/base.py</code> 末尾集中 import，让「导入模型」这件事有唯一的落点：</p>
+
+<pre><code class="language-python"># app/db/base.py
+class Base(DeclarativeBase):
+    pass
+
+# 让 Alembic 能「看见」所有模型；只 import 不调用
+from app.models.document import Document   # noqa: E402,F401
+from app.models.chunk import Chunk         # noqa: E402,F401</code></pre>
+
+<h3 id="ch12-3">为什么 env.py 必须是 async 版本</h3>
+
+<p>因为你的驱动是 asyncpg。同步的 Alembic 连不上 <code>postgresql+asyncpg://</code>。所以 env.py 里是这么写的：</p>
+
+<pre><code class="language-python">async def run_async_migrations() -&gt; None:
+    connectable = async_engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)   # ← 关键的一行
+    await connectable.dispose()
+
+def run_migrations_online() -&gt; None:
+    asyncio.run(run_async_migrations())</code></pre>
+
+<p><code>connection.run_sync(do_run_migrations)</code> 是那座桥：<strong>Alembic 内部的迁移逻辑是同步的</strong>（它要执行任意 SQL），<code>run_sync</code> 让它在一个绿色线程里以同步风格操作这个异步连接。</p>
+
+<p><code>poolclass=pool.NullPool</code> 也是有意为之：迁移是一次性任务，不需要连接池。用完即断，避免在 <code>versions/</code> 里留下悬挂连接。</p>
+
+<h3 id="ch12-4">常用命令</h3>
+
+<pre><code class="language-bash">uv run alembic revision --autogenerate -m "create documents"   # 生成迁移（必须人工检查）
+uv run alembic upgrade head                                    # 应用到最新
+uv run alembic downgrade -1                                    # 回滚一步
+uv run alembic current                                         # 当前版本
+uv run alembic history                                         # 全部历史</code></pre>
+
+<blockquote>
+<p><strong><code>--autogenerate</code> 生成的文件必须人工读一遍。</strong>它在这些场景下会出错：</p>
+<ul>
+<li><strong>字段重命名</strong>——会被当成「删一个、加一个」，<strong>数据全丢</strong>。必须手改成 <code>op.alter_column(..., new_column_name=...)</code></li>
+<li><strong>数据迁移</strong>——它只懂结构，不懂数据</li>
+<li><strong>枚举类型变更</strong>——PostgreSQL 的 enum 改动不被完整支持</li>
+<li><strong>部分索引、表达式索引</strong>——经常漏掉</li>
+</ul>
+</blockquote>
+
+<h3 id="ch12-5">这个项目的现状：env.py 目前是语法错误，跑不了</h3>
+
+<p>文件第 37–43 行长这样（原文照抄）：</p>
+
+<pre><code class="language-python"># ===========腾讯云cos================
+COS_SECRET_ID = AKID****************
+COS_SECRET_KEY = ****************
+COS_REGION = ap-beijing
+COS_BUCKET = mybucket-1310566933
+
+CORS_ORIGINS = http://localhost:5173</code></pre>
+
+<p>这是把 <code>.env</code> 的内容粘进了 Python 文件，但<strong>没加引号</strong>。跑一遍语法检查，报错很明确：</p>
+
+<pre><code class="language-text">File "backend/alembic/env.py", line 41
+    CORS_ORIGINS = http://localhost:5173
+                       ^
+SyntaxError: invalid syntax</code></pre>
+
+<p>两件事一起解决：<strong>删掉这几行</strong>（配置走 <code>settings</code> 已经有了，完全不需要重复），并且把 <code>config.py</code> 里的明文密钥一起移到 <code>.env</code>。</p>
+
+<h2 id="ch13">13. 工程化缺口盘点</h2>
+
+<div class="tw"><table>
+<thead><tr><th>缺什么</th><th>现状</th><th>建议</th></tr></thead>
+<tbody>
+<tr><td>模型层</td><td><code>Base</code> 是空的，一个模型都没有</td><td>按业务建 <code>app/models/</code></td></tr>
+<tr><td>Schema 层</td><td>无</td><td><code>app/schemas/</code>——Pydantic 出入参，与 ORM 模型解耦</td></tr>
+<tr><td>Service 层</td><td>无</td><td><code>app/services/</code>——业务编排。路由里只做参数转换和调用</td></tr>
+<tr><td>迁移</td><td><code>versions/</code> 目录是空的</td><td>先有模型才能 autogenerate，见第 14 章</td></tr>
+<tr><td>测试</td><td>无 <code>tests/</code>，pytest 也不在依赖里</td><td><code>uv add --dev pytest pytest-asyncio httpx</code></td></tr>
+<tr><td>容器化</td><td>没有 Dockerfile</td><td>后端自己也该能进容器（现在只有 pgvector 在 compose 里）</td></tr>
+<tr><td><code>.gitignore</code></td><td><strong>0 字节</strong></td><td>见下</td></tr>
+<tr><td><code>__init__.py</code></td><td>一个都没有</td><td>显式建出来，别依赖 namespace package</td></tr>
+<tr><td>README</td><td>0 字节</td><td>至少写清「怎么起、依赖什么」</td></tr>
+</tbody>
+</table></div>
+
+<h3 id="ch13-1"><code>.gitignore</code> 是空的，后果比看起来严重</h3>
+
+<ul>
+<li><code>.venv/</code> 有几千个文件，会被 <code>git status</code> 全部列出来，真正的改动被淹没</li>
+<li><code>.env</code> 一旦创建就会被提交 → <strong>密钥进 Git 历史</strong>，之后清理成本极高</li>
+<li><code>*.pyc</code> 已经有一份被跟踪了：<code>backend/app/core/__pycache__/config.cpython-310.pyc</code></li>
+</ul>
+
+<p>一个能立刻用的最小版本：</p>
+
+<pre><code class="language-gitignore">.venv/
+__pycache__/
+*.py[cod]
+.env
+.idea/
+.DS_Store</code></pre>
+
+<blockquote>
+<p><strong>已经跟踪的 <code>.pyc</code> 光加 <code>.gitignore</code> 是不够的</strong>——<code>.gitignore</code> 只对新文件生效。已经入库的必须显式脱离跟踪：</p>
+<pre><code class="language-bash">git rm --cached backend/app/core/__pycache__/config.cpython-310.pyc</code></pre>
+</blockquote>
+
+<p><strong>一个好消息</strong>：我用 <code>git log --all -S'AKID…'</code> 查过，那两个 COS 密钥<strong>还没有进入任何一次提交</strong>——它们只存在于未提交的工作区改动里。所以现在处理，成本几乎为零。</p>
+
+</section>
+
+<section class="part" id="p4">
+<h1 class="part-title">第四部分 · 动手与避坑</h1>
+
+<h2 id="ch14">14. 加一个完整功能的步骤清单</h2>
+
+<p>假设要加「文档上传」功能。<strong>严格按这个顺序走</strong>，每一步都能独立验证——这比一次写完再调试快得多。</p>
+
+<h3 id="ch14-1">第 1 步：模型</h3>
+
+<pre><code class="language-python"># app/models/document.py
+from sqlalchemy import String, DateTime, func
+from sqlalchemy.orm import Mapped, mapped_column
+from app.db.base import Base
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), index=True)
+    cos_key: Mapped[str] = mapped_column(String(500), unique=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())</code></pre>
+
+<p>注意 <code>Mapped[...]</code> + <code>mapped_column(...)</code> 是 SQLAlchemy 2.0 的<strong>新风格</strong>：类型注解驱动。<code>Mapped[str]</code> 自动推导出 <code>String</code>，可空性也由 <code>Mapped[str]</code> 还是 <code>Mapped[str | None]</code> 决定，不用再写 <code>nullable=True</code>。</p>
+
+<p>然后别忘了在 <code>app/db/base.py</code> 末尾 import 它（第 12 章讲过原因）。</p>
+
+<h3 id="ch14-2">第 2 步：验证映射能不能跑通（不要跳过）</h3>
+
+<pre><code class="language-bash">uv run python -c "from app.db.base import Base; print(sorted(Base.metadata.tables))"</code></pre>
+
+<p>应该输出 <code>['documents']</code>。</p>
+
+<p><strong>如果输出 <code>[]</code>，说明 import 没生效。</strong>这时候去跑 autogenerate，会生成一个删掉数据库所有表的脚本。这一步 10 秒钟，能拦住一个灾难。</p>
+
+<h3 id="ch14-3">第 3 步：生成迁移并人工检查</h3>
+
+<pre><code class="language-bash">uv run alembic revision --autogenerate -m "create documents"</code></pre>
+
+<p>打开生成的文件，确认 <code>op.create_table("documents", …)</code> 里的字段和模型一致。</p>
+
+<h3 id="ch14-4">第 4 步：应用迁移</h3>
+
+<pre><code class="language-bash">uv run alembic upgrade head</code></pre>
+
+<h3 id="ch14-5">第 5 步：Schema（出入参）</h3>
+
+<pre><code class="language-python"># app/schemas/document.py
+from pydantic import BaseModel, ConfigDict
+
+class DocumentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    title: str
+    cos_key: str
+
+class DocumentCreate(BaseModel):
+    title: str</code></pre>
+
+<p><code>from_attributes=True</code> 让 Pydantic 能从 ORM 对象（而不是 dict）构造，这是 v2 的写法（v1 里叫 <code>orm_mode</code>）。</p>
+
+<p><strong>出入参一定要分成两个类。</strong>出参永远不该包含内部字段——否则某天你给模型加了个 <code>internal_note</code> 字段，它会自动出现在 API 响应里。这是典型的「无意泄露」。</p>
+
+<h3 id="ch14-6">第 6 步：Service（业务逻辑）</h3>
+
+<pre><code class="language-python"># app/services/document.py
+async def create_document(session: AsyncSession, payload: DocumentCreate) -&gt; Document:
+    doc = Document(title=payload.title, cos_key=f"docs/{uuid4().hex}")
+    session.add(doc)
+    await session.commit()
+    await session.refresh(doc)      # ← 因为 expire_on_commit=False
+    return doc</code></pre>
+
+<p><code>refresh</code> 不能省：<code>expire_on_commit=False</code> 意味着 commit 后对象不自动刷新，不 refresh 就拿不到数据库生成的 <code>id</code> 和 <code>created_at</code>。</p>
+
+<h3 id="ch14-7">第 7 步：路由</h3>
+
+<pre><code class="language-python"># app/api/routes/documents.py
+router = APIRouter(prefix="/documents", tags=["documents"])
+
+@router.post("", response_model=DocumentOut, status_code=201)
+async def create(payload: DocumentCreate, session: DbSession) -&gt; DocumentOut:
+    doc = await document_service.create_document(session, payload)
+    return DocumentOut.model_validate(doc)</code></pre>
+
+<p>路由里<strong>只做三件事</strong>：接参数、调 service、转输出。不写 SQL，不写业务分支。这样 service 可以脱离 HTTP 被单测。</p>
+
+<h3 id="ch14-8">第 8 步：挂载</h3>
+
+<pre><code class="language-python"># app/main.py
+from app.api.routes import documents
+app.include_router(documents.router, prefix="/api")</code></pre>
+
+<h3 id="ch14-9">第 9 步：验证</h3>
+
+<pre><code class="language-bash">uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+curl -X POST http://127.0.0.1:8000/api/documents \
+     -H 'Content-Type: application/json' \
+     -d '{"title":"测试文档"}'</code></pre>
+
+<p>再去 <code>http://127.0.0.1:8000/docs</code> 看一眼——新接口应该已经出现在 <code>documents</code> 分组下，而且响应模型渲染得很清楚。这是 FastAPI「自动文档」红利最直观的地方。</p>
+
+<blockquote>
+<p><strong>为什么必须「造完一层验一层」</strong>：这九步里任何一步错了，后面的报错都会指向别处。比如第 2 步没验，第 3 步生成的迁移会删表，第 4 步一跑数据库就空了——而下一层的报错只会说「表不存在」，让你查错方向。</p>
+</blockquote>
+
+<h2 id="ch15">15. 新手最常踩的坑</h2>
+
+<p>前四条是<strong>搭建这个骨架时真实踩到的</strong>，不是假设。后四条是同类项目的高频问题。</p>
+
+<h3 id="ch15-1">① 依赖名拼错，但安装「成功」了</h3>
+
+<p><code>pyproject.toml</code> 里写的是 <code>unicorn[standard]&gt;=2.1.4</code>——少了一个 <code>v</code>。</p>
+
+<p><code>unicorn</code> 在 PyPI 上<strong>真的存在</strong>：它是 <strong>Unicorn CPU 模拟器</strong>（QEMU 派生的指令级模拟引擎），跟 ASGI 服务器毫无关系。它不带任何命令行入口，所以 <code>uv sync</code> 一路绿灯，但 <code>.venv/bin/</code> 里永远不会有 <code>uvicorn</code>：</p>
+
+<pre><code class="language-text">error: Failed to spawn: `uvicorn`
+Caused by: No such file or directory (os error 2)</code></pre>
+
+<p><strong>排查顺序</strong>（记住这个顺序，能省很多时间）：</p>
+
+<ol>
+<li>看项目 venv 的 <code>bin/</code> 里有没有这个可执行文件</li>
+<li>看 <code>site-packages/</code> 里有没有这个包</li>
+<li>最后才怀疑 <code>PATH</code></li>
+</ol>
+
+<p>而且这里还有<strong>连带的第二个坑</strong>：<code>uvicorn</code> 的版本号是 <code>0.x</code>，写 <code>&gt;=2.1.4</code> 是<strong>不可满足</strong>的约束。所以改拼写时必须同时改版本号（本项目已修成 <code>uvicorn[standard]&gt;=0.53.0</code>）。</p>
+
+<h3 id="ch15-2">② 模块级代码缩进断裂，属性「凭空消失」</h3>
+
+<p><code>config.py</code> 里 <code>cors_origins</code> 和 <code>cors_origin_list</code> 掉到了类外面：</p>
+
+<pre><code class="language-python">    @property
+    def cos_configured(self) -&gt; bool: ...
+
+cors_origins: str = "http://localhost:5173"     # ← 顶格了，成了模块变量
+
+@property                                        # ← 装饰在模块级函数上
+def cors_origin_list(self) -&gt; list[str]: ...</code></pre>
+
+<p>报错是：</p>
+
+<pre><code class="language-text">AttributeError: 'Settings' object has no attribute 'cors_origin_list'</code></pre>
+
+<p><strong>为什么会这样</strong>：<code>@property</code> 装饰在模块级函数上，产出的只是一个挂在模块上的 property 对象（永远不会被触发）。<code>Settings</code> 类里根本没有这个属性。</p>
+
+<p><strong>一行定死的方法</strong>——别靠肉眼，靠运行时断言：</p>
+
+<pre><code class="language-python">from app.core import config as c
+print([n for n in vars(c.Settings) if not n.startswith('_')])
+print(hasattr(c.settings, 'cors_origin_list'))</code></pre>
+
+<p>输出 <code>['model_config', 'cos_configured']</code> 和 <code>False</code>——当场就能确认属性不在类里。</p>
+
+<blockquote>
+<p>这类「作用域错位」的错，IDE 不一定报，因为<strong>语法是完全合法的</strong>。这是它最阴的地方。</p>
+</blockquote>
+
+<h3 id="ch15-3">③ 函数名少一个词</h3>
+
+<p><code>main.py</code> 调用 <code>register_error_handlers(app)</code>，而 <code>error_handlers.py</code> 里定义的是 <code>register_exception_handlers</code>。差一个 <code>exception</code>，直接 <code>AttributeError</code>。</p>
+
+<p><strong>30 秒的防御手段</strong>——给每个模块写一个 import 冒烟测试：</p>
+
+<pre><code class="language-python"># tests/test_imports.py
+import importlib
+
+def test_all_modules_import():
+    for m in ["app.main", "app.core.config", "app.core.logging",
+              "app.core.exceptions", "app.db.base", "app.db.session",
+              "app.api.deps", "app.api.error_handlers",
+              "app.api.routes.health", "app.storage.cos_client"]:
+        importlib.import_module(m)</code></pre>
+
+<p>这一个测试能筛掉一整类「名字对不上 / 循环依赖 / 语法错」的问题，成本几乎为零。搭骨架阶段最该先写的就是它。</p>
+
+<h3 id="ch15-4">④ 把配置粘进 Python 文件，忘了引号</h3>
+
+<p><code>alembic/env.py</code> 里那段 <code>COS_SECRET_ID = AKID…</code>。症状是 <code>SyntaxError</code>，报错位置指向行号，<strong>但问题往往出在上一行的变量名或上下文</strong>。</p>
+
+<p><strong>预防</strong>：提交前跑一遍全量语法检查。</p>
+
+<pre><code class="language-bash">uv run python -m compileall -q app alembic && echo "语法 OK"</code></pre>
+
+<p>（注意 <code>compileall</code> 会生成 <code>__pycache__/</code>，所以 <code>.gitignore</code> 得先写好。）</p>
+
+<h3 id="ch15-5">⑤ 端口在监听，但客户端连不上</h3>
+
+<p><code>uvicorn --host 127.0.0.1</code> <strong>只绑 IPv4 回环</strong>。macOS 上 <code>localhost</code> 同时解析出 <code>::1</code> 和 <code>127.0.0.1</code>，如果某个客户端只试 IPv6，就会连不上而报「拒绝连接」。</p>
+
+<pre><code class="language-bash">lsof -nP -iTCP:8000 -sTCP:LISTEN     # 看它到底监听在哪个地址</code></pre>
+
+<p>要同时收 IPv6 用 <code>--host ::</code>，或用 <code>--host 0.0.0.0</code> 收所有网卡（<strong>后者局域网内其他机器也能访问，注意安全</strong>——这会顺带把你的开发接口暴露给同一网段的所有人）。</p>
+
+<h3 id="ch15-6">⑥ 浏览器把 http 自动升级成 https</h3>
+
+<p><strong>现象</strong>：<code>curl http://127.0.0.1:8000/docs</code> 通，浏览器却报「此网站无法提供安全连接 / 发送的响应无效」。</p>
+
+<p><strong>机制</strong>：这是 <code>ERR_SSL_PROTOCOL_ERROR</code>。浏览器对纯 HTTP 的服务端做 TLS 握手，拿到一堆明文，握手失败。</p>
+
+<p><strong>怎么确认是它</strong>——能复现出一模一样的错误就说明对上了：</p>
+
+<pre><code class="language-bash">curl -k https://127.0.0.1:8000/docs</code></pre>
+
+<p><strong>怎么排除代理干扰</strong>：</p>
+
+<pre><code class="language-bash">curl -x http://127.0.0.1:7897 http://127.0.0.1:8000/docs   # 走代理仍 200 → 不是代理问题</code></pre>
+
+<p><strong>怎么修</strong>：地址栏显式写 <code>http://</code>；或在浏览器设置里关掉「始终使用安全连接」；或访问 <code>chrome://net-internals/#hsts</code> 删掉该域的安全策略。</p>
+
+<p>顺带一个判断技巧：浏览器历史库里记录的 scheme 才是真相。地址栏输入过的 URL 会用 <code>transition=1</code>（TYPED）标记，页面真正渲染成功的话标题也会记下来——这两条信息足以区分「加载失败」和「加载成功」。</p>
+
+<h3 id="ch15-7">⑦ 改了代码但没生效</h3>
+
+<p><code>--reload</code> 依赖 <code>watchfiles</code>，而它来自 <code>uvicorn[standard]</code> 这个 extra。如果装的是裸 <code>uvicorn</code>，热重载不会工作。</p>
+
+<pre><code class="language-bash">uv run python -c "import watchfiles; print(watchfiles.__version__)"</code></pre>
+
+<h3 id="ch15-8">⑧ <code>uv run</code> 找不到命令 ≠ 命令不存在</h3>
+
+<p><code>uv run &lt;cmd&gt;</code> 的查找顺序是：<strong>项目 venv 的 <code>bin/</code> → 系统 <code>PATH</code></strong>。它<strong>不会</strong>像 <code>uvx</code> 那样去下载。</p>
+
+<p>所以「<code>uv run</code> 报找不到」时，该问的是「项目环境里到底装没装这个包」，而不是「我 <code>PATH</code> 是不是有问题」。</p>
+
+<p>临时用一下但不想改依赖：</p>
+
+<pre><code class="language-bash">uv run --with some-package some-command</code></pre>
+
+<p>这个 <code>--with</code> 只对本次运行生效，不写进 <code>pyproject.toml</code>——非常适合<strong>验证性试跑</strong>。</p>
+
+<hr>
+
+<p><strong>结语</strong></p>
+
+<p>这个骨架的价值在于：它<strong>把「该分几层、每层放什么、依赖往哪个方向走」这些决定替你做了</strong>。上面四个实测的坑全都不是设计问题，而是接线时的笔误——而笔误是可以用断言和冒烟测试系统性消灭的。</p>
+
+<p>真正要补的在业务侧：模型、Service、迁移、测试。按第 14 章那九步走一遍，这个骨架就活了。走的时候每步都验一次，你会发现自己的调试时间至少有八成被省掉了。</p>
+
+</section>
+
+<section class="part" id="p5">
+<h1 class="part-title">第五部分 · 自测</h1>
+
+<h2 id="ch16">16. 选择题（32 道）</h2>
+
+<p>每题先自己作答，再展开「查看答案与解析」对照。<strong>干扰项都是从真实误解里挑出来的</strong> —— 如果你觉得「有两个都对」，回去重读对应那一章：通常说明那个知识点你只记住了结论，没记住理由。</p>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q1</strong>　这个骨架的「三条数据线」是怎么分的？</p>
+<p>A. 文件进 PostgreSQL，元数据进 COS，向量进 Milvus<br>B. 文件进 COS，元数据进 PostgreSQL，向量进 pgvector<br>C. 全部进 PostgreSQL，靠不同 schema 区分<br>D. 文件进 COS，元数据进 Redis，向量进 ES</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：B</strong>　原文原话是「文件进 COS，元数据进 PG，向量进 pgvector」，这三条线决定了后面所有的分层方式。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q2</strong>　关于 pgvector 在这个项目里的落地状况，正确的描述是？</p>
+<p>A. 向量表与索引都已建好，可以直接做相似度检索<br>B. 依赖里没有 pgvector 相关的库，需要先手动补上<br>C. compose 里起的是 <code>pgvector/pgvector:pg16</code> 镜像，但代码里还<strong>没有任何模型或索引落地</strong><br>D. 向量存在 COS 里，pgvector 只用来存元数据</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：C</strong>　镜像到位说明「计划」把向量放这里，但只是选型就位、尚未落地。这一点必须如实说明，别把计划说成现状。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q3</strong>　依赖方向的铁律是？</p>
+<p>A. <code>api → db / storage → core</code>，<code>core</code> 绝不反向 import 任何上层<br>B. <code>core → api → db → storage</code>，自上而下<br>C. 各层平级，按需互相 import，只要不出现循环<br>D. <code>db → api → core</code>，数据层驱动接口层</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：A</strong>　core 是最底层的地基，依赖只能单向指向它。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q4</strong>　要验证 <code>core</code> 层是「干净」的（没混进 Web 框架依赖），最直接的一条命令是？</p>
+<p>A. <code>uv sync --check</code>，看依赖解析有没有冲突<br>B. <code>ls .venv/bin | grep fastapi</code>，看有没有装 Web 框架<br>C. <code>uv run uvicorn app.main:app</code>，能起来就说明干净<br>D. <code>uv run python -c "from app.core import config; print(config.settings.app_name)"</code></p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：D</strong>　在<strong>完全不加载 Web 框架</strong>的前提下 import 地基，能跑通就说明 core 干净；报缺 fastapi 就说明地基里混进了上层依赖。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q5</strong>　<code>GET /api/health/db</code> 这个路径是怎么拼出来的？</p>
+<p>A. 在 <code>health.py</code> 里一行写死 <code>/api/health/db</code><br>B. uvicorn 启动参数里配置的路由前缀<br>C. <code>include_router(prefix="/api")</code> + <code>APIRouter(prefix="/health")</code> + <code>@router.get("/db")</code> 三层拼出来<br>D. 由 <code>alembic.ini</code> 里的 <code>version_path</code> 决定</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：C</strong>　<strong>很多人找不到路由就栽在这里</strong>：只看了路由文件，忘了 <code>include_router</code> 那层还加了前缀。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q6</strong>　关于 <code>get_session</code> 这个生成器依赖，哪个说法是对的？</p>
+<p>A. <code>yield</code> 之后的清理代码，在路由函数执行之前就运行完了<br>B. FastAPI 会在响应发出<strong>之后</strong>才回到 <code>yield</code> 下面继续执行清理<br>C. 路由函数中途抛异常时，<code>session</code> 不会被关闭<br>D. <code>session</code> 关闭意味着一条 TCP 连接被断开</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：B</strong>　C 错在 <code>async with</code> 有 finally 语义，抛异常也必定关闭；D 错在归还的是<strong>连接池里的连接</strong>，不是关掉 TCP。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q7</strong>　<code>uvicorn app.main:app</code> 里的冒号表示什么？</p>
+<p>A. 包名与模块名的分隔符<br>B. 「文件名:函数名」，uvicorn 会去调用这个函数<br>C. 「模块路径:类名」，uvicorn 会实例化它<br>D. 「模块路径:变量名」；这个 <code>app</code> 是模块被 import 时 <code>create_app()</code> 执行的产物</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：D</strong>　<code>app</code> 是<strong>模块被 import 时的副作用产物</strong>，不是 uvicorn 构造的。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q8</strong>　用 <code>create_app()</code> 工厂函数的好处，<strong>不包括</strong>下面哪一条？</p>
+<p>A. 启动更快 —— 工厂函数跳过了 FastAPI 的初始化开销<br>B. 可测性 —— 每次返回全新实例，测试之间互不污染<br>C. 可注入 —— 可以在建实例时换上测试库连接串、关掉 CORS<br>D. 副作用集中 —— 日志、中间件、异常处理器、路由都在一个函数里</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：A</strong>　这三条收益里没有「启动更快」——工厂模式是架构收益，跟性能无关。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q9</strong>　在 <code>backend/app/core/config.py</code> 里，<code>Path(__file__).resolve().parents[3]</code> 算出来是哪一层？</p>
+<p>A. <code>backend/app/core</code><br>B. <code>backend/app</code><br>C. <code>backend</code><br>D. 仓库根目录 <code>agentic_rag-1</code></p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：D</strong>　parents[0]=core、[1]=app、[2]=backend、[3]=仓库根。本项目选的是仓库根（有些项目会选 [2]）。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q10</strong>　<code>.env</code> 文件当前<strong>不存在</strong>，那么这个项目实际跑的是哪套配置？</p>
+<p>A. 直接启动失败 —— <code>env_file</code> 指向的文件不存在会抛异常<br>B. 从系统环境变量里读一组值，读不到才用默认值<br>C. 源码里写死的默认值 —— 包括那两个明文 COS 密钥<br>D. 从 <code>docker-compose.yml</code> 的 <code>environment</code> 段读</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：C</strong>　pydantic-settings 对 <code>env_file</code> 缺失是<strong>静默忽略</strong>的，所以你跑的是源码默认值。这正是密钥必须搬家的原因。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q11</strong>　<code>configure_logging()</code> 里那个 <code>_configured</code> 全局标志解决的是什么问题？</p>
+<p>A. 线程安全 —— 防止多个线程同时写 handler<br>B. 幂等 —— 不加的话测试里连续建 10 个 app 会挂 10 个 handler，每条日志打印 10 遍<br>C. 日志级别的动态调整<br>D. 避免日志被写进磁盘文件</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：B</strong>　注意 <code>configure_logging()</code> 里还有 <code>root.handlers.clear()</code>，两者配合保证「只此一个输出口」。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q12</strong>　为什么要接管 <code>uvicorn</code> / <code>uvicorn.error</code> / <code>uvicorn.access</code> 这三个 logger？</p>
+<p>A. uvicorn 启动时自带一套 handler，不清掉会出现 access log 与业务日志格式不一致<br>B. 为了把日志量降下来<br>C. 不清掉的话 uvicorn 无法启动<br>D. 为了把 uvicorn 的日志写进文件做归档</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：A</strong>　做法是 <code>handlers.clear()</code> + <code>propagate = True</code>，让它们顺着 root 的 handler 走。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q13</strong>　<code>AppException.__init__</code> 里为什么用 <code>if message is not None</code>，而不是 <code>self.message = message or self.message</code>？</p>
+<p>A. 性能考虑，<code>is None</code> 比 <code>or</code> 快<br>B. 因为 <code>message</code> 有可能是数字类型<br>C. 因为空字符串 <code>""</code> 是合法输入，用 <code>or</code> 会被当成 falsy 吞掉<br>D. 两者完全等价，只是风格偏好</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：C</strong>　这个细节很多人写错。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q14</strong>　关于两个异常 handler 的分工，正确的是？</p>
+<p>A. 绑 <code>AppException</code> 的处理未预料异常，兜底 handler 处理业务异常<br>B. 绑 <code>AppException</code> 的是预料之内的错误，信息可以直接给用户；绑 <code>Exception</code> 的兜底，<strong>绝不能</strong>把原始异常信息吐给客户端<br>C. 两个 handler 按注册顺序匹配，先注册的优先命中<br>D. 兜底 handler 可以省略，FastAPI 有默认实现</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：B</strong>　原始异常可能含 SQL 语句、文件路径、连接串。另外 C 是错的：<code>add_exception_handler</code> 按类型<strong>精确匹配 + 沿 MRO 上溯</strong>，与注册顺序无关。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q15</strong>　<code>pool_pre_ping=True</code> 解决什么问题？</p>
+<p>A. 减少连接数，降低数据库压力<br>B. 加密连接，防止传输被窃听<br>C. 自动重连数据库并重放失败的 SQL<br>D. 从池里取连接前先 ping，断了就换一条 —— 不设的话数据库重启后前几个请求会报 connection closed</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：D</strong>　C 是夸大：pre_ping 只保证「取到的是活连接」，不会重放你那条失败的 SQL。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q16</strong>　<code>expire_on_commit=False</code> 的<strong>代价</strong>是什么？</p>
+<p>A. commit 后对象数据是<strong>快照</strong>，不再自动刷新 —— 想拿数据库算出来的值（触发器改的字段、自增主键）要手动 <code>await session.refresh(obj)</code><br>B. 内存占用变高<br>C. 事务不会真正提交<br>D. 无法使用连接池</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：A</strong>　它解决的问题是「commit 后再读属性会触发新 SELECT（隐性 N+1），异步下还可能报 <code>MissingGreenlet</code>」。代价要清楚，别只记收益。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q17</strong>　<code>postgresql://</code> 与 <code>postgresql+asyncpg://</code> 的区别，以及写错时会发生什么？</p>
+<p>A. 没有区别，SQLAlchemy 会自动挑选驱动<br>B. 后者只是加了个标记，无实际作用<br>C. 前者用 psycopg2（同步，会阻塞事件循环），后者用 asyncpg（异步）；写错时 <code>create_async_engine</code> 会在启动时直接报错<br>D. 写错会静默退化成同步驱动，跑一段时间后才发现</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：C</strong>　这是「早失败」的设计，比悄悄退化成同步阻塞好得多。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q18</strong>　测试时想换掉真实数据库，用 <code>DbSession</code> 这套写法最省事的方式是？</p>
+<p>A. 改 <code>db/session.py</code> 里的连接串<br>B. <code>app.dependency_overrides[get_session] = fake</code> —— 一行换掉，不用动任何路由代码<br>C. 在每个路由函数里加 <code>if</code> 判断当前环境<br>D. 用 monkey patch 替换 <code>AsyncSessionLocal</code></p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：B</strong>　这是依赖注入带来的核心红利：可整体替换。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q19</strong>　相对 Flask 的 <code>g.db = connect()</code> / <code>before_request</code> 钩子，FastAPI 这套依赖注入最本质的差别是？</p>
+<p>A. 速度更快，异步框架的固有优势<br>B. 支持的数据库种类更多<br>C. 能少写很多代码<br>D. 靠<strong>函数签名显式声明</strong>资源依赖，而不是靠约定和全局变量 —— 可测试性高一个量级</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：D</strong>　这是 FastAPI 相对 Flask 最大的体验差异。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q20</strong>　为什么 <code>CosClient.ping()</code> 里必须用 <code>asyncio.to_thread</code>？</p>
+<p>A. 为了并发调用多个桶<br>B. 因为 <code>head_bucket</code> 是 CPU 密集型操作<br>C. 腾讯云 SDK 是同步的（内部走 <code>requests</code>），在 async 函数里直接调会卡住整个事件循环，同进程所有并发请求一起等<br>D. 为了绕过 SDK 的连接数限制</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：C</strong>　这是异步项目接同步 SDK 的<strong>通用解药</strong>：pymysql、boto3、requests、PIL 全都算。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q21</strong>　<code>get_cos_client()</code> 用懒加载 + 模块级单例，主要目的是？</p>
+<p>A. 进程启动时不连 COS —— 密钥错或网络不通时服务照样能起来，只是 <code>/health/cos</code> 报 error<br>B. 节省内存，避免常驻连接对象<br>C. 提高上传速度<br>D. 避免重复计费</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：A</strong>　背后的原则是：<strong>依赖的失败不应该阻止进程启动</strong>，否则一个次要依赖抖动就会引发服务雪崩。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q22</strong>　<code>@router.get("")</code> 与 <code>@router.get("/")</code>（配 <code>prefix="/health"</code>）的区别？</p>
+<p>A. 两者完全一样，FastAPI 会归一化<br>B. 前者得到 <code>/api/health</code>，后者得到 <code>/api/health/</code>（带尾斜杠，FastAPI 会对不匹配的那个发 307 重定向）<br>C. 后者会直接报错，不允许这样写<br>D. 前者必须写成 <code>"/"</code>，否则 404</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：B</strong>　补一刀：前端 <code>fetch</code> 遇到重定向<strong>有时会丢掉请求体</strong>。这是个能坑半天的细节。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q23</strong>　按探针设计的基本功，liveness probe 和 readiness probe 应该分别挂哪两个端点？</p>
+<p>A. 两个都挂 <code>/api/health/db</code>，最全面<br>B. 两个都挂 <code>/api/health</code>，最轻量<br>C. liveness → <code>/api/health/cos</code>，readiness → <code>/api/health</code><br>D. liveness → <code>/api/health</code>（不碰外部依赖），readiness → <code>/api/health/db</code>（依赖没好就不接流量）</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：D</strong>　弄反了会出现「数据库慢 → Pod 被判死亡 → 重启 → 数据库更慢」的<strong>死亡螺旋</strong>。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q24</strong>　健康检查内部吞异常、返回 HTTP 200 + <code>status="error"</code>，理由是什么？</p>
+<p>A. 因为 FastAPI 不允许探针端点返回非 200<br>B. 为了让日志更干净<br>C. HTTP 200 表示「检查执行了」，body 里的 <code>status</code> 才表示「结果好不好」；否则监控要同时看状态码和 body 才能区分「服务挂了」和「数据库挂了」<br>D. 出于安全考虑，避免暴露健康状态</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：C</strong>　但要知道还有另一派做法：探针直接返回 503，让负载均衡器不用解析 body 就能摘流量。<strong>两种都对，关键是团队内统一。</strong></p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q25</strong>　让 Alembic 的 <code>--autogenerate</code> 正常工作的<strong>硬依赖</strong>是什么？</p>
+<p>A. <code>env.py</code> 必须 import 到所有模型，让 <code>Base.metadata</code> 里真的有这些表<br>B. <code>alembic.ini</code> 里必须填对 <code>sqlalchemy.url</code><br>C. 数据库里必须先清空数据<br>D. 必须换回同步驱动</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：A</strong>　B 是干扰项：<code>env.py</code> 会用 <code>set_main_option</code> 覆盖掉 ini 里那行占位符，所以 ini 填不填对无所谓。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q26</strong>　<code>connection.run_sync(do_run_migrations)</code> 这行为什么存在？</p>
+<p>A. 为了加速迁移<br>B. Alembic 内部的迁移逻辑是同步的，<code>run_sync</code> 让它在一个绿色线程里以同步风格操作这个异步连接<br>C. 为了兼容 MySQL<br>D. 为了关闭连接池</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：B</strong>　顺带记住 <code>poolclass=pool.NullPool</code> 的理由：迁移是一次性任务，用完即断。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q27</strong>　已经入库的 <code>.pyc</code> 文件，光加 <code>.gitignore</code> 为什么不够？</p>
+<p>A. 因为 <code>.gitignore</code> 的语法写得不完整<br>B. 因为 <code>.pyc</code> 是二进制文件，git 无法识别<br>C. 其实够了，只是需要重启 git 进程<br>D. <code>.gitignore</code> 只对<strong>新文件</strong>生效，已跟踪的必须显式脱离：<code>git rm --cached &lt;path&gt;</code></p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：D</strong>　本项目已经有一份被跟踪了：<code>backend/app/core/__pycache__/config.cpython-310.pyc</code>。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q28</strong>　按九步清单，为什么第 2 步「验证映射能不能跑通」不能跳过？</p>
+<p>A. 为了检查数据库能不能连上<br>B. 为了预热 ORM，加快首次查询<br>C. 如果 <code>Base.metadata.tables</code> 输出 <code>[]</code>（说明 import 没生效），此时跑 autogenerate 会生成一个「删掉所有表」的脚本<br>D. 为了顺便生成 <code>__init__.py</code></p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：C</strong>　这一步 10 秒钟，能拦住一个灾难。应该输出 <code>['documents']</code>。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q29</strong>　为什么出参（<code>DocumentOut</code>）和入参（<code>DocumentCreate</code>）要分成两个类？</p>
+<p>A. 为了减少代码量<br>B. 出参永远不该包含内部字段 —— 否则某天给模型加个 <code>internal_note</code>，它会自动出现在 API 响应里，属于无意泄露<br>C. 因为 Pydantic 不允许同一个模型既做入参又做出参<br>D. 为了加快序列化速度</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：B</strong>　另外出参要写 <code>model_config = ConfigDict(from_attributes=True)</code>（v2 写法，v1 里叫 <code>orm_mode</code>），才能从 ORM 对象构造。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q30</strong>　<code>pyproject.toml</code> 里写成 <code>unicorn[standard]&gt;=2.1.4</code>，为什么 <code>uv sync</code> 会「成功」但 <code>uvicorn</code> 根本用不了？</p>
+<p>A. <code>unicorn</code> 是 PyPI 上真实存在的另一个包（Unicorn CPU 模拟器），不带任何命令行入口，所以 <code>.venv/bin/</code> 里永远不会有 <code>uvicorn</code><br>B. 因为 uv 的缓存有 bug，需要 <code>uv cache clean</code><br>C. 因为版本号 <code>&gt;=2.1.4</code> 写高了<br>D. 因为没加 <code>--dev</code> 参数</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：A</strong>　还有个<strong>连带的第二个坑</strong>：<code>uvicorn</code> 是 0.x 版本，<code>&gt;=2.1.4</code> 是<strong>不可满足</strong>的约束 —— 改拼写时必须同时改版本号。所以 C 只说对了一半，它单独解释不了「装得成功」。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q31</strong>　<code>uv run &lt;cmd&gt;</code> 报「找不到命令」时，正确的排查顺序是？</p>
+<p>A. 先查 <code>PATH</code>，再查项目 venv<br>B. 先重装 uv<br>C. 先看项目 venv 的 <code>bin/</code>，再看 <code>site-packages/</code>，<strong>最后</strong>才怀疑 <code>PATH</code><br>D. 直接用 <code>uvx &lt;cmd&gt;</code> 绕过</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：C</strong>　<code>uv run</code> 的查找顺序是「项目 venv 的 bin/ → 系统 PATH」，它<strong>不会</strong>像 <code>uvx</code> 那样去下载。所以该问的是「项目环境里装没装这个包」。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>Q32</strong>　<code>uvicorn --host 127.0.0.1</code> 之后，macOS 上某些客户端连不上，最可能的原因是？</p>
+<p>A. 被防火墙拦截了<br>B. 端口被别的进程占用了<br>C. uvicorn 需要 root 权限才能监听<br>D. 它只绑了 <strong>IPv4</strong> 回环，而 macOS 的 <code>localhost</code> 会同时解析出 <code>::1</code>（IPv6）和 <code>127.0.0.1</code>，只试 IPv6 的客户端就会连不上</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看答案与解析</summary><p><strong>答案：D</strong>　判据是 <code>lsof -nP -iTCP:8000 -sTCP:LISTEN</code>，看它到底监在哪个地址。</p></details>
+</div>
+
+<h2 id="ch17">17. 问答题（15 道）</h2>
+
+<p>每题对应一章。答不出来或者答得含糊，就回去重读那一章——<strong>能用自己的话讲清楚机制，才算真懂了</strong>。</p>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W1</strong>　这个骨架把「文件 / 元数据 / 向量」分别放在哪里？为什么说这是「决定了后面所有分层方式」的取舍？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p><strong>文件进 COS</strong>（原始 PDF / 文档不进数据库）、<strong>元数据进 PostgreSQL</strong>、<strong>向量进 pgvector</strong>。</p><p>之所以能决定分层：三类数据的访问方式完全不同——对象存储是「网络 IO + 同步 SDK」，关系库是「异步连接池 + ORM」，向量是「专门的类型与索引」。它们的生命周期、失败模式、性能特征都不一样，所以必须各有一个薄封装层，而不是混在一个「数据访问模块」里。</p><p>补充一句必须如实说明的：compose 起的是 <code>pgvector/pgvector:pg16</code> 镜像，说明<strong>计划</strong>把向量放这里，但代码里还没有任何模型或索引落地——目前只是选型就位。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W2</strong>　写出依赖方向的铁律。如果 <code>core/config.py</code> 里 import 了 <code>api</code> 里的东西，会有什么后果？怎么用一条命令验证地基是干净的？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>铁律：<code>api → db / storage → core</code>，<strong><code>core</code> 绝不反向 import 任何上层</strong>。</p><p>后果有两条：① 形成<strong>循环依赖</strong>（api 依赖 core，core 又依赖 api）；② <code>core</code> 再也没法<strong>脱离 Web 框架单独测试</strong>——而它本来是最该被单独测试的部分。</p><p>验证命令：<code>uv run python -c "from app.core import config; print(config.settings.app_name)"</code>。能跑通说明 core 干净；报缺 fastapi 之类就说明地基里混进了上层依赖。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W3</strong>　以 <code>GET /api/health/db</code> 为例，说出从 uvicorn 到把 JSON 写回 socket 的完整链路（至少 6 个环节）。</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>① 浏览器发 <code>HTTP/1.1 GET /api/health/db</code>；② <strong>uvicorn</strong> 把原始 socket 字节解析成 ASGI 的 <code>scope</code> + <code>receive</code>/<code>send</code>；③ <strong>Starlette 路由匹配</strong>，三层 prefix 拼出 <code>/api</code> + <code>/health</code> + <code>/db</code>；④ <strong>依赖解析</strong>：看到 <code>session: DbSession</code> → <code>Annotated[AsyncSession, Depends(get_session)]</code> → 调用 <code>get_session()</code>；⑤ 进入 <code>async with AsyncSessionLocal() as session</code>，执行到 <code>yield session</code>，把 session 交给路由函数；⑥ <code>health_db()</code> 执行 <code>await session.execute(text("SELECT 1"))</code>；⑦ 返回 <code>HealthStatus</code>，按 <code>response_model</code> 校验后序列化成 JSON；⑧ <strong>get_session 的收尾</strong>：<code>async with</code> 退出 → <code>session.close()</code> → 连接归还池；⑨ uvicorn 把 JSON 字节写回 socket。</p><p><strong>最容易被忽略的是第 ⑧ 步</strong>——它在响应发出之后才执行，这正是「一个请求一个 session，用完必定归还」的保证。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W4</strong>　<code>app.main:app</code> 里冒号前后分别是什么？敲下 <code>uv run uvicorn app.main:app</code> 时 uvicorn 实际做了哪三件事？<code>app</code> 是什么时候被创建的？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>冒号前是<strong>模块路径</strong> <code>app.main</code>，冒号后是<strong>变量名</strong> <code>app</code>。</p><p>uvicorn 做三件事：① import <code>app.main</code> 模块（模块级代码被执行，于是最后那行 <code>app = create_app()</code> 跑完）；② 取模块里的 <code>app</code> 属性——这就是冒号的含义；③ 把它当 ASGI 应用，开始 listen 端口。</p><p>所以 <code>app</code> 是<strong>模块被 import 时的副作用产物</strong>，不是 uvicorn 构造的。这也是 <code>create_app()</code> 工厂模式能成立的前提。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W5</strong>　<code>PROJECT_ROOT = Path(__file__).resolve().parents[3]</code> 是怎么算的？为什么「仓库根下没有 <code>.env</code>」这件事比看起来严重？该做哪三件事？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>从 <code>.../agentic_rag-1/backend/app/core/config.py</code> 出发：parents[0] = <code>core</code>，[1] = <code>app</code>，[2] = <code>backend</code>，[3] = <strong>仓库根</strong>。</p><p>严重在于：pydantic-settings 的 <code>env_file</code> 指向不存在的文件时<strong>不报错</strong>，直接使用字段默认值。也就是说你现在跑的是源码里写死的默认值——<strong>包括那两个腾讯云 COS 密钥</strong>。</p><p>三件事：① 建 <code>.env</code>；② 把密钥移进去；③ 把 <code>.env</code> 写进 <code>.gitignore</code>。而且必须<strong>顺带删掉 <code>config.py</code> 里的明文默认值</strong>（改成空字符串，让 <code>cos_configured</code> 自然变 <code>False</code>）——否则「移走」是假的，密钥还在源码里躺着。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W6</strong>　<code>configure_logging()</code> 里有四件「不这么做就会出问题」的事，分别是什么？<code>get_logger</code> 只有一行 <code>return logging.getLogger(name)</code>，为什么还要包这一层？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>四件事：① <strong><code>_configured</code> 幂等闸</strong>——否则测试里连续建 10 个 app 就挂 10 个 handler，每条日志打印 10 遍；② <strong><code>root.handlers.clear()</code></strong>——保证「只此一个」输出口，避免重复打印；③ <strong>接管 uvicorn 三个 logger</strong>——清掉它们自带的 handler 并设 <code>propagate=True</code>，否则 access log 和业务日志格式不一致；④ <strong>输出到 <code>sys.stdout</code></strong>——12-factor 惯例，日志不自己管文件轮转，交给容器 / 系统采集。</p><p><code>get_logger</code> 是<strong>留接口</strong>：日后要换成 structlog、要注入 trace_id、要加敏感信息脱敏过滤器时，只要改这一个函数，全项目几十个调用点不用动。成本三行，收益是「未来某天的一次重构不用全项目替换」。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W7</strong>　<code>AppException</code> 的写法有四层讲究，分别是什么？两个 handler 的分工是什么？为什么注册顺序无关？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>四层讲究：① <strong>用类属性承载默认值</strong>——子类只声明 <code>code</code>/<code>message</code>/<code>http_status</code> 就完成定制，完全不用写 <code>__init__</code>；② <strong>用 <code>if message is not None</code> 而非 <code>or</code></strong>——空字符串是合法输入；③ <strong><code>super().__init__(self.message)</code></strong>——让 <code>str(exc)</code> 有内容，否则 <code>logger.exception</code> 打出来是空白；④ <strong>单独的 <code>*</code> 强制关键字传参</strong>——防止位置参数传错顺序。</p><p>分工：<code>AppException</code> 是「预料之内的错误」，业务代码主动抛，信息可以直接给用户看；<code>Exception</code> 是兜底的，<strong>绝不能把原始异常信息吐给客户端</strong>（可能含 SQL 语句、文件路径、连接串），只记日志、返回统一话术。兜底 handler 必须有——没有它，未捕获异常会让客户端收到 uvicorn 的纯文本 traceback。</p><p>注册顺序无关：<code>add_exception_handler</code> 是按类型<strong>精确匹配</strong>的，Starlette 会沿异常的 <strong>MRO</strong> 往上找注册过的 handler，所以 <code>NotFoundException</code> 自然命中 <code>AppException</code> 那一条。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W8</strong>　<code>expire_on_commit=False</code> 解决什么问题、代价是什么？<code>get_session</code> 的三个层次分别是什么？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>解决的问题：commit 后如果对象字段被标记为过期，再读属性会触发新的 SELECT（<strong>隐性 N+1</strong>），异步下还可能报 <code>MissingGreenlet</code>。</p><p>代价：commit 之后对象里的数据是<strong>快照</strong>，不再自动从库刷新。依赖「commit 后重新读能拿到数据库算出来的值」（触发器改的字段、自增主键）时，要手动 <code>await session.refresh(obj)</code>。</p><p><code>get_session</code> 的三层：① <code>async with</code> 保证<strong>无论正常返回还是抛异常，session 一定会关闭</strong>（注意归还的是连接池里的连接，不是关掉 TCP）；② <code>yield</code> 把它变成 FastAPI 的<strong>生成器依赖</strong>——请求进来前执行 <code>yield</code> 之前，响应发出后执行 <code>yield</code> 之后；③ <code>AsyncGenerator[AsyncSession, None]</code> 的类型注解，让 <code>DbSession</code> 那个 <code>Annotated</code> 能推导出正确类型。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W9</strong>　<code>DbSession = Annotated[AsyncSession, Depends(get_session)]</code> 把哪三层缝在了一起？FastAPI 拿到它会自动做哪三步？<code>Annotated</code> 相对 <code>= Depends(...)</code> 的优势是什么？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>缝起三层：<strong>类型</strong>（<code>AsyncSession</code>）+ <strong>注入指令</strong>（<code>Depends(get_session)</code>）+ <strong>一个可复用的名字</strong>（<code>DbSession</code>）。</p><p>FastAPI 自动三步：① 调用 <code>get_session()</code> 拿到生成器；② 进场（执行到 <code>yield</code>），把 yield 出来的 <code>AsyncSession</code> 塞进参数；③ 函数执行完，退场（继续执行 <code>yield</code> 之后的清理代码）。</p><p><code>Annotated</code> 的优势：把「类型」和「注入指令」合并到一个名字里。没有它就得写 <code>session: AsyncSession = Depends(get_session)</code>——默认值的位置被占用了（这个参数再也没法有别的默认值），而且每个调用点都要重复写一遍完整表达式。</p><p>更本质地说，<strong>这是「依赖倒置」的落点</strong>：路由依赖抽象（<code>DbSession</code> 这个名字），不依赖具体构造方式。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W10</strong>　<code>cos_client.py</code> 的三个关键决策是什么？「依赖的失败不应该阻止进程启动」在这份代码里怎么体现、为什么要这么做？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>三个决策：① <strong>用 <code>asyncio.to_thread</code> 包同步 SDK</strong>——腾讯云 SDK 内部走 <code>requests</code>，会阻塞线程，在 async 函数里直接调会卡住整个事件循环；② <strong>懒加载 + 模块级单例</strong>——第一次调用 <code>get_cos_client()</code> 时才真正构造；③ <strong>构造失败抛项目自己的 <code>ConfigurationError</code></strong>——它会被全局 handler 转成 <code>503 + {"code":"configuration_error"}</code>，前端能识别；抛裸的 <code>RuntimeError</code> 就只能落进 500 兜底。</p><p>体现：懒加载让<strong>进程启动时不连 COS</strong>。密钥填错或网络不通时，服务照样能起来，只是 <code>/health/cos</code> 报 error——而不是整个后端起不来。理由：一个次要依赖抖动不应该引发服务雪崩。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W11</strong>　三个探针端点分别探什么？各自挂了意味着什么？为什么 liveness 和 readiness 必须挂不同端点？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p><code>/api/health</code>：探「进程活着、能返回响应」，挂了＝进程死了或端口不通。关键：<strong>它不碰任何外部依赖</strong>。</p><p><code>/api/health/db</code>：真发一条 <code>SELECT 1</code>，挂了＝数据库不可用或连接串配错。<code>/api/health/cos</code>：真做一次 <code>head_bucket</code>，挂了＝密钥错 / 桶不存在 / 网络不通。</p><p>正确的挂法：<strong>liveness → <code>/health</code></strong>（别让数据库抖动把好 Pod 杀掉重启）、<strong>readiness → <code>/health/db</code></strong>（依赖没好就不接流量）。混成一个端点会导致「数据库慢 → Pod 被判定死亡 → 重启 → 数据库更慢」的<strong>死亡螺旋</strong>。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W12</strong>　<code>env.py</code> 里真正重要的只有两行，分别是什么、各解决什么问题？由此产生什么硬依赖？<code>--autogenerate</code> 在哪些场景下会出错？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>① <code>config.set_main_option("sqlalchemy.url", settings.database_url)</code>——把连接串从 <code>Settings</code> 取过来覆盖 <code>alembic.ini</code> 里的。这样<strong>数据库地址只有一个来源</strong>（<code>.env</code>），不会出现「应用连 A 库、迁移改 B 库」的事故。② <code>target_metadata = Base.metadata</code>——<code>--autogenerate</code> 的<strong>对照基准</strong>。</p><p>硬依赖：必须让 <code>env.py</code> <strong>import 到所有模型</strong>。否则 <code>Base.metadata</code> 里没有你的表，autogenerate 会生成一个「删掉所有表」的脚本——<strong>这是 Alembic 最危险的事故</strong>。标准做法是在 <code>app/db/base.py</code> 末尾集中 import。</p><p>出错场景：<strong>字段重命名</strong>（被当成「删一个、加一个」，数据全丢，必须手改成 <code>op.alter_column(..., new_column_name=...)</code>）、<strong>数据迁移</strong>（它只懂结构不懂数据）、<strong>枚举类型变更</strong>（PG 的 enum 改动不被完整支持）、<strong>部分索引 / 表达式索引</strong>（经常漏）。</p><p>另外别忘了为什么 env.py 必须是 async 版本：驱动是 asyncpg，同步 Alembic 连不上 <code>postgresql+asyncpg://</code>。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W13</strong>　工程化缺口盘一下（至少 5 项）。为什么说「<code>.gitignore</code> 是 0 字节」后果比看起来严重？已经入库的 <code>.pyc</code> 怎么处理？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>缺口：<strong>模型层</strong>（<code>Base</code> 是空的，一个模型都没有）、<strong>Schema 层</strong>、<strong>Service 层</strong>、<strong>迁移</strong>（<code>versions/</code> 空）、<strong>测试</strong>（无 <code>tests/</code>，pytest 也不在依赖里）、<strong>容器化</strong>（无 Dockerfile）、<strong><code>.gitignore</code></strong>（0 字节）、<strong><code>__init__.py</code></strong>（一个都没有）、<strong>README</strong>（0 字节）。</p><p>严重在于：① <code>.venv/</code> 有几千个文件，会被 <code>git status</code> 全部列出来，真正的改动被淹没；② <code>.env</code> 一旦创建就会被提交 → <strong>密钥进 Git 历史</strong>，之后清理成本极高；③ 已经有一份 <code>.pyc</code> 被跟踪了：<code>backend/app/core/__pycache__/config.cpython-310.pyc</code>。</p><p>已入库的必须<strong>显式脱离跟踪</strong>：<code>git rm --cached backend/app/core/__pycache__/config.cpython-310.pyc</code>——因为 <code>.gitignore</code> 只对新文件生效。好消息：那两个 COS 密钥还没进入任何一次提交，现在处理成本几乎为零。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W14</strong>　说出加一个功能的九步顺序。为什么必须「造完一层验一层」？第 2 步具体在验什么、验不过会导致什么？</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p>九步：① <strong>模型</strong>（<code>app/models/document.py</code>，<code>Mapped[...]</code> + <code>mapped_column(...)</code> 新风格；别忘了在 <code>db/base.py</code> 末尾 import 它）；② <strong>验证映射能跑通</strong>（不要跳过）；③ <strong>生成迁移并人工检查</strong>；④ <strong>应用迁移</strong>；⑤ <strong>Schema</strong>（出参 <code>DocumentOut</code> + 入参 <code>DocumentCreate</code>，分成两个类）；⑥ <strong>Service</strong>（业务编排，commit 后 <code>refresh</code>）；⑦ <strong>路由</strong>（只做接参数、调 service、转输出）；⑧ <strong>挂载</strong>（<code>include_router(..., prefix="/api")</code>）；⑨ <strong>验证</strong>（起服务 + curl + 看 <code>/docs</code>）。</p><p>必须一层一验：这九步里任何一步错了，后面的报错都会<strong>指向别处</strong>——你会照着错误的线索查很久。</p><p>第 2 步验的是 <code>uv run python -c "from app.db.base import Base; print(sorted(Base.metadata.tables))"</code> 是否输出 <code>['documents']</code>。如果输出 <code>[]</code>，说明 import 没生效；此时跑 autogenerate 会生成一个删掉数据库所有表的脚本，第 4 步一跑数据库就空了——而下一层的报错只会说「表不存在」，让你查错方向。这一步 10 秒钟，能拦住一个灾难。</p></details>
+</div>
+
+<div class="note" style="margin:14px 0;color:var(--text)">
+<p><strong>W15</strong>　从 8 个坑里挑出<strong>搭建这个骨架时真实踩到的</strong>那 4 个，说出各自的症状与修法。</p>
+<details><summary style="cursor:pointer;color:var(--accent)">查看参考答案</summary><p><strong>① 依赖名拼错，但安装「成功」了。</strong>症状：<code>uv run uvicorn</code> 报 <code>Failed to spawn: uvicorn</code> / <code>No such file or directory</code>。原因：<code>unicorn</code> 是 PyPI 上真实存在的另一个包（Unicorn CPU 模拟器），不带命令行入口。修法：改成 <code>uvicorn[standard]</code>，<strong>版本号要一起改</strong>（uvicorn 是 0.x，<code>&gt;=2.1.4</code> 不可满足）。</p><p><strong>② 模块级代码缩进断裂，属性「凭空消失」。</strong>症状：<code>AttributeError: 'Settings' object has no attribute 'cors_origin_list'</code>。原因：<code>cors_origins</code> 和 <code>@property cors_origin_list</code> 掉到类外面，<code>@property</code> 装饰在模块级函数上产出的只是挂在模块上的 property 对象。修法：整体缩进收进 <code>Settings</code> 类（<code>@lru_cache</code> 那两行保持模块级）。判据：<code>vars(Settings)</code> + <code>hasattr(settings, 'cors_origin_list')</code>，别靠肉眼。</p><p><strong>③ 函数名少一个词。</strong>症状：<code>AttributeError</code>。原因：<code>main.py</code> 调 <code>register_error_handlers</code>，实际定义是 <code>register_exception_handlers</code>。修法：改对名字，并加一个 import 冒烟测试（<code>tests/test_imports.py</code> 用 <code>importlib</code> 逐个 import 10 个模块），一次筛掉整类「名字对不上 / 循环依赖 / 语法错」的问题。</p><p><strong>④ 把配置粘进 Python 文件，忘了引号。</strong>症状：<code>SyntaxError: invalid syntax</code>（<code>alembic/env.py</code> line 41），报错位置指向行号，但问题往往出在上下文。修法：删掉那几行（配置走 <code>settings</code> 已经有了，不需要重复），并把明文密钥移到 <code>.env</code>。预防：提交前跑 <code>uv run python -m compileall -q app alembic</code>。</p></details>
+</div>
+
+</section>
+
+</main>
+</body>
+</html>

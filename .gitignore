@@ -1,0 +1,7 @@
+# 历史备份不入库：
+#   index.html.bak2 里留着脱敏前的真实密钥，index.html.bak 是过时版本
+index.html.bak*
+
+# 工具工作目录 / 系统垃圾
+.workbuddy/
+.DS_Store
