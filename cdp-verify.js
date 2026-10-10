@@ -403,7 +403,7 @@ async function viewport(w, h, mobile = false, scale = 2) {
     var cards=[].slice.call(document.querySelectorAll('.cards .card')).filter(function(c){
       return c.classList.contains('ext') });
     if(!cards.length) return {n:0};
-    var c=cards[0], pts=c.querySelectorAll('.pts li'), cf=c.querySelector('.cf');
+    var c=cards[0], tgs=c.querySelectorAll('.tgs .tg'), cf=c.querySelector('.cf');
     var r=c.getBoundingClientRect();
     return {
       n: cards.length,
@@ -411,11 +411,14 @@ async function viewport(w, h, mobile = false, scale = 2) {
       target: c.getAttribute('target'),
       rel: c.getAttribute('rel'),
       title: c.querySelector('.ct').textContent.trim(),
-      pts: pts.length,
-      pt1: pts.length? pts[0].textContent.trim().slice(0,26):'',
+      tgs: tgs.length,
+      tg1: tgs.length? tgs[0].textContent.trim():'',
+      cs: c.querySelector('.cs').textContent.trim(),
+      pts: c.querySelectorAll('.pts li').length,
       footer: cf.textContent.trim(),
       w: Math.round(r.width), h: Math.round(r.height),
       ctColor: getComputedStyle(c.querySelector('.ct')).color,
+      tgColor: tgs.length? getComputedStyle(tgs[0]).color : '',
       overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     };
   `);
@@ -424,9 +427,15 @@ async function viewport(w, h, mobile = false, scale = 2) {
   eq("卡片 target=_blank", ext.target, "_blank");
   ok("卡片 rel 含 noopener", /noopener/.test(ext.rel || ""), ext.rel);
   ok("卡片标题是论文名", /Direct Sparse Odometry/.test(ext.title), ext.title);
-  ok("卡片渲染了要点列表", ext.pts >= 4, `${ext.pts} 条；首条「${ext.pt1}」`);
+  ok("卡片渲染了关键词标签", ext.tgs >= 3, `${ext.tgs} 个；首个「${ext.tg1}」`);
+  eq("卡片不再渲染长要点列表", ext.pts, 0);
+  ok("卡片摘要在 100 字以内", ext.cs.length > 0 && ext.cs.length <= 100, `${ext.cs.length} 字`);
   ok("卡片底部提示「打开原文」", /打开原文/.test(ext.footer), ext.footer);
   ok("卡片高度正常（没被压扁）", ext.h >= 150, `${ext.h}px`);
+  // 收藏卡片有意做小：只给「关键词 + 一段短摘要」。这里把上限钉住，
+  // 免得以后又往卡片里塞长内容 —— 曾塞过 6 条要点，单张高到 785px。
+  // 上限按「268px 列宽 + 84 字摘要 + 4 个关键词」实测给（约 390px），留 30px 余量。
+  ok("卡片是紧凑的（首页窄列下高度 ≤ 420px）", ext.h <= 420, `${ext.h}px`);
   ok("浅色主题下卡片标题是深色字", lum(ext.ctColor) < 140, `${ext.ctColor} lum=${Math.round(lum(ext.ctColor))}`);
   ok("首页仍无横向溢出", ext.overflow <= 0, String(ext.overflow));
   await evaluate(`
@@ -436,17 +445,20 @@ async function viewport(w, h, mobile = false, scale = 2) {
   await sleep(400);
   await shot("12-home-ext-card");
 
-  // 深色主题下要点列表的文字必须还读得清（--muted 在两种主题里是不同的值）
+  // 深色主题下关键词标签与摘要的文字必须还读得清（--muted / --accent 在两种主题里是不同的值）
   await evaluate(`document.getElementById('theme-btn').click(); return 1`);
   await sleep(500);
   const extDark = await evaluate(`
     var c=document.querySelector('.cards .card.ext');
-    return { li: getComputedStyle(c.querySelector('.pts li')).color,
+    return { li: getComputedStyle(c.querySelector('.tgs .tg')).color,
+             cs: getComputedStyle(c.querySelector('.cs')).color,
              ct: getComputedStyle(c.querySelector('.ct')).color,
              body: getComputedStyle(document.body).color };
   `);
-  ok("深色主题：卡片要点文字足够亮", lum(extDark.li) > 110,
+  ok("深色主题：关键词标签文字足够亮", lum(extDark.li) > 110,
     `${extDark.li} lum=${Math.round(lum(extDark.li))}`);
+  ok("深色主题：卡片摘要文字足够亮", lum(extDark.cs) > 110,
+    `${extDark.cs} lum=${Math.round(lum(extDark.cs))}`);
   ok("深色主题：卡片标题足够亮", lum(extDark.ct) > 110,
     `${extDark.ct} lum=${Math.round(lum(extDark.ct))}`);
   await shot("13-home-ext-card-dark");
@@ -481,7 +493,9 @@ async function viewport(w, h, mobile = false, scale = 2) {
              allExt: cards.length>0 && cards.every(function(c){return c.classList.contains('ext')}),
              href: cards.length? cards[0].getAttribute('href'):null,
              target: cards.length? cards[0].getAttribute('target'):null,
+             hasTgs: cards.length? cards[0].querySelectorAll('.tgs .tg').length:0,
              hasPts: cards.length? cards[0].querySelectorAll('.pts li').length:0,
+             cardH: cards.length? Math.round(cards[0].getBoundingClientRect().height):0,
              navOn: nav?nav.classList.contains('on'):false,
              navN: nav?nav.querySelector('.n').textContent:'',
              overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
@@ -492,13 +506,17 @@ async function viewport(w, h, mobile = false, scale = 2) {
   ok("我的收藏页：卡片直指论文原文",
     favPage.href === "https://jakobengel.github.io/pdf/DSO.pdf", favPage.href);
   eq("我的收藏页：卡片新标签打开", favPage.target, "_blank");
-  ok("我的收藏页：卡片带着要点", favPage.hasPts >= 4, `${favPage.hasPts} 条`);
+  ok("我的收藏页：卡片带着关键词", favPage.hasTgs >= 3, `${favPage.hasTgs} 个`);
+  eq("我的收藏页：卡片不再有要点列表", favPage.hasPts, 0);
+  // 这一页列宽更宽（340px+），同样的内容应该比首页那张更矮
+  ok("我的收藏页：卡片是紧凑的（宽列下高度 ≤ 320px）",
+    favPage.cardH > 0 && favPage.cardH <= 320, `${favPage.cardH}px`);
   eq("我的收藏页：侧栏入口高亮", favPage.navOn, true);
   eq("我的收藏页：侧栏计数 = 资料数", favPage.navN, String(favPage.n));
   ok("我的收藏页：无横向溢出", favPage.overflow <= 0, String(favPage.overflow));
   await shot("14b-my-favorites");
 
-  // 移动端：要点列表在窄屏不该撑破卡片
+  // 移动端：关键词标签在窄屏不该撑破卡片（pill 是 nowrap 的，靠 flex-wrap 换行）
   await viewport(390, 844, true, 3);
   await evaluate(`location.hash='#/'; return 1`);
   await sleep(700);
@@ -509,15 +527,17 @@ async function viewport(w, h, mobile = false, scale = 2) {
   await sleep(500);
   const extMob = await evaluate(`
     var c=document.querySelector('.cards .card.ext');
-    var li=c.querySelector('.pts li');
+    var tgs=c.querySelector('.tgs'), tgl=[].slice.call(c.querySelectorAll('.tgs .tg'));
     return { w: Math.round(c.getBoundingClientRect().width),
              h: Math.round(c.getBoundingClientRect().height),
-             over: Math.round(li.scrollWidth - li.clientWidth),
+             over: Math.round(tgs.scrollWidth - tgs.clientWidth),
+             tagOver: Math.max.apply(null, tgl.map(function(t){return t.scrollWidth - t.clientWidth})),
              pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
   `);
   ok("移动端：外链卡片宽度适配", extMob.w > 200 && extMob.w <= 390, `${extMob.w}px`);
   ok("移动端：外链卡片高度正常", extMob.h >= 150, `${extMob.h}px`);
-  ok("移动端：要点文本不溢出", extMob.over <= 1, `${extMob.over}px`);
+  ok("移动端：关键词行不溢出", extMob.over <= 1, `${extMob.over}px`);
+  ok("移动端：单个关键词不被截断", extMob.tagOver <= 1, `${extMob.tagOver}px`);
   ok("移动端：页面无横向溢出", extMob.pageOverflow <= 0, String(extMob.pageOverflow));
   await shot("15-mobile-ext-card");
 

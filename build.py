@@ -11,7 +11,8 @@
     categories.json                分类体系（分类里带 "nav": true 的不进分类树，
                                    改由侧栏对应入口承载 —— 目前只有「收藏」这么用）
     articles/<id>/meta.json        条目元信息：order / id / cat / title / kicker / summary / tags
-                                   外链资料再加 url（+ 可选 points），不放 source.html
+                                   外链资料再加 url，不放 source.html
+                                   （url + 短摘要 + 关键词；摘要超过 100 字直接报错）
     articles/<id>/source.html      正文，需含 <main>…</main>
 
 设计要点：
@@ -37,6 +38,10 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_OUT = HERE / "index.html"
 ARTICLES_DIR = HERE / "articles"
 CATS_FILE = HERE / "categories.json"
+
+# 外链收藏卡片的摘要字数上限（中文按字符计）。卡片上只有「关键词 + 这一小段」，
+# 所以卡在这里而不是靠自觉 —— 超了直接退出，报出实际字数。
+EXT_SUMMARY_MAX = 100
 
 # 站点元信息。subtitle 留空则自动取「分类名 · 分类名」。
 SITE = {
@@ -86,16 +91,19 @@ def load_articles() -> list[tuple[dict, Path]]:
         meta.setdefault("order", 999)
 
         # 外链条目（收藏的书签）：只放 meta.json，不放 source.html。
-        # 库内不留正文副本，卡片只展示元信息，点击直接跳原文。
+        # 库内不留正文副本，卡片只展示「关键词 + 一段短摘要」，点击直接跳原文。
+        # 摘要长度在这里硬性卡住：卡片做大过一次（要点列全列上去，单张高 785px），
+        # 那种「把论文摘要摊在卡片上」的做法没必要 —— 细节在原文里。
         url = (meta.get("url") or "").strip()
         if url:
             if not re.match(r"^https?://", url):
                 sys.exit(f"× {d.name}/meta.json 的 url 必须 http/https 开头：{url!r}")
+            n = len(meta["summary"].strip())
+            if n > EXT_SUMMARY_MAX:
+                sys.exit(f"× {d.name}/meta.json 的 summary 有 {n} 字，超过 {EXT_SUMMARY_MAX} 字上限"
+                         f"（外链卡片只放一段短摘要，细节留给原文）")
             meta["url"] = url
             meta["ext"] = True
-            meta.setdefault("points", [])
-            if not isinstance(meta["points"], list):
-                sys.exit(f"× {d.name}/meta.json 的 points 必须是数组")
             found.append((meta, None))
             continue
 
@@ -209,7 +217,7 @@ def build_data() -> dict:
         if src_path is None:
             arts.append({**spec, "html": "", "outline": [], "words": 0, "read": 0})
             print(f"    [{art_id}] {spec['title']} —— 外链卡片，"
-                  f"{len(spec['points'])} 条要点 → {spec['url']}")
+                  f"{len(spec['tags'])} 个关键词 → {spec['url']}")
             continue
 
         raw = src_path.read_text(encoding="utf-8")
@@ -563,11 +571,12 @@ html[data-theme="dark"] .body pre .copy.done{color:#7fd6a2;border-color:#2f5c42}
 .h2sec h2{font-size:18px;margin:0;font-weight:660}
 .h2sec .c{font-size:12px;color:var(--muted);font-family:var(--mono)}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:14px}
-/* 「我的收藏」页：卡片少、要点长，列宽放大一档，免得一行只挤十来个字。
+/* 「我的收藏」页：卡片少、摘要短，列宽放大一档，免得一行只挤十来个字。
    min(340px,100%) 是防止窄屏（<380px）时 340px 的列宽撑破容器。 */
 .cards.favs{grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))}
 .card{
-  display:block;background:var(--card);border:1px solid var(--border);border-radius:var(--r);
+  display:flex;flex-direction:column;
+  background:var(--card);border:1px solid var(--border);border-radius:var(--r);
   padding:16px 18px;text-decoration:none;color:var(--text);transition:border-color .15s,box-shadow .15s,transform .15s;
 }
 .card:hover{border-color:var(--accent-line);box-shadow:var(--shadow);transform:translateY(-1px)}
@@ -575,12 +584,19 @@ html[data-theme="dark"] .body pre .copy.done{color:#7fd6a2;border-color:#2f5c42}
 .card .badge{flex:none;font:10px/16px var(--mono);font-weight:700;padding:1px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent)}
 .card .k{font-size:12px;color:var(--accent);margin-bottom:7px;font-weight:500}
 .card .cs{font-size:12.5px;color:var(--muted);line-height:1.65}
-.card .cf{margin-top:10px;font-size:11px;color:var(--muted);font-family:var(--mono)}
-/* 外链卡片（收藏的资料书签）：库内不留正文副本，点一下直接开原文 */
+/* 同一行里卡片会被拉伸成等高，所以页脚用 margin-top:auto 顶到最底下 ——
+   否则短卡片（比如只有 4 个关键词的那张）中段会空出一大块。 */
+.card .cf{margin-top:auto;padding-top:10px;font-size:11px;color:var(--muted);font-family:var(--mono)}
+/* 外链卡片（收藏的资料书签）：库内不留正文副本，点一下直接开原文。
+   卡片有意做小：只给「关键词 + 一段摘要」，不放长要点列表 —— 论文的细节在原文里，
+   卡片只负责让人一眼认出「这是什么、要不要点进去」。
+   标签用 <span> 不用 <a>：整张卡片本身就是 <a>（指向原文），锚点不能套锚点。 */
 .card.ext .ct{color:var(--accent)}
-.card .pts{margin:9px 0 0;padding:0;list-style:none}
-.card .pts li{position:relative;padding-left:13px;font-size:12.5px;line-height:1.62;color:var(--muted);margin-top:4px}
-.card .pts li::before{content:"·";position:absolute;left:3px;color:var(--accent);font-weight:700}
+.card .tgs{display:flex;flex-wrap:wrap;gap:5px;margin:9px 0 0}
+.card .tgs .tg{
+  font-size:11px;padding:2px 8px;border-radius:999px;white-space:nowrap;
+  background:var(--accent-soft);color:var(--accent);
+}
 .card .cf .go{color:var(--accent);font-weight:600}
 .extico{font-size:10px;color:var(--accent);flex:none}
 .artlist{display:flex;flex-direction:column;gap:2px}
@@ -726,8 +742,8 @@ function plain(h){
   return (d.textContent||'').replace(/\s+/g,' ').trim();
 }
 ARTS.forEach(function(a){
-  // 外链条目没有正文，让它也能被搜到：把摘要与要点并进检索文本
-  a._plain=plain(a.html)+(a.ext?(' '+a.summary+' '+(a.points||[]).join(' ')):'');
+  // 外链条目没有正文，让它也能被搜到：把摘要与关键词并进检索文本
+  a._plain=plain(a.html)+(a.ext?(' '+a.summary+' '+a.tags.join(' ')):'');
 });
 var INDEX=ARTS.map(function(a){
   return {a:a, t:(a.title+' '+(a.kicker||'')+' '+a.tags.join(' ')).toLowerCase(),
@@ -917,15 +933,15 @@ function viewCat(cid){
 }
 
 function cardOf(a){
-  var pts=a.ext?(a.points||[]):[];
+  var tgs=a.ext?a.tags:[];
   var foot=a.ext
     ? '<span class="go">打开原文 ↗</span>'+(isFav(a.id)?' · ★':'')
     : a.words+' 字 · '+a.read+' min'+(isFav(a.id)?' · ★':'');
   return '<a class="card'+(a.ext?' ext':'')+'" href="'+esc(linkOf(a))+'"'+tgtAttr(a)+'>'
     +'<div class="ct"><span class="badge">'+esc(catIcon(a.cat))+'</span>'+esc(a.title)+'</div>'
     +'<div class="k">'+esc(a.kicker||'')+'</div>'
+    +(tgs.length?'<div class="tgs">'+tgs.map(function(t){return '<span class="tg">'+esc(t)+'</span>'}).join('')+'</div>':'')
     +'<div class="cs">'+esc(a.summary)+'</div>'
-    +(pts.length?'<ul class="pts">'+pts.map(function(p){return '<li>'+esc(p)+'</li>'}).join('')+'</ul>':'')
     +'<div class="cf">'+foot+'</div></a>';
 }
 function catIcon(id){var c=CATS.filter(function(x){return x.id===id})[0];return c?(c.icon||'·'):'·'}
@@ -984,7 +1000,7 @@ function viewHome(){
     +'<li><b>加一篇</b>：在 <code>articles/</code> 下建一个目录，放 <code>meta.json</code>（元信息）'
     +'和 <code>source.html</code>（含 <code>&lt;main&gt;</code> 的正文），再跑 <code>python3 build.py</code></li>'
     +'<li><b>收藏资料（外部链接）</b>：目录里只放 <code>meta.json</code> 并写 <code>url</code>，'
-    +'库里不留副本 —— 卡片展示标题、摘要与要点，点一下直达原文。'
+    +'库里不留副本 —— 卡片只展示关键词与一小段摘要（100 字以内），点一下直达原文。'
     +'这类资料只出现在侧栏<strong>「我的收藏」</strong>，不混进分类树</li>'
     +'<li><b>加分类</b>：编辑 <code>categories.json</code> 后重跑</li>'
     +'<li><b>快捷键</b>：<code>/</code> 或 <code>⌘K</code> 搜索，<code>↑↓</code> 选，<code>Enter</code> 打开，<code>Esc</code> 关闭</li></ul>'
@@ -1012,7 +1028,7 @@ function viewList(title,desc,list,emptyMsg){
 function viewFavs(){
   var h='<div class="page">'+crumbs([{t:'首页',href:'#/'},{t:'我的收藏'}]);
   h+='<div class="hero"><h1>我的收藏</h1><p class="sub">收藏的外部资料：论文、规范、开源项目。'
-    +'库内只留卡片（标题、出处、要点），点一下直达原文 —— 不占本地体积，也不会因为原文更新而过时。</p></div>';
+    +'库内只留卡片（标题、出处、关键词、一段短摘要），点一下直达原文 —— 不占本地体积，也不会因为原文更新而过时。</p></div>';
   if(!EXTS.length){
     h+='<div class="empty">还没有收藏的资料。在 <code>articles/</code> 下建一个目录，'
       +'在里面放一份 <code>meta.json</code> 并写上 <code>url</code> 即可。</div>';

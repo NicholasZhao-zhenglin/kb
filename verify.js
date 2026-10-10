@@ -64,6 +64,11 @@ if (DATA) {
     calc.extArts.every((a) => /^https?:\/\//.test(a.url) && !a.html
       && !(a.outline || []).length && !a.words),
     calc.extArts.map((a) => `${a.id}→${a.url}`).join(",") || "(无外链条目)");
+  // 收藏卡片只承载「关键词 + 一段短摘要」：摘要必短（生成器另用 100 字硬卡），
+  // 也不能再有 points —— 卡片做大过一次，单张 785px，要点列表是主因
+  ok("数据：外链卡片摘要 ≤100 字，且数据里不带 points",
+    calc.extArts.every((a) => a.summary.length <= 100 && a.points === undefined),
+    calc.extArts.map((a) => `${a.id}:${a.summary.length}字`).join(", ") || "(无外链条目)");
   eq("数据：首篇表格 15（与原文一致）", (DATA.arts[0].html.match(/<table/g) || []).length, 15);
   eq("数据：首篇代码块 34（与原文一致）", (DATA.arts[0].html.match(/<pre>/g) || []).length, 34);
   ok("数据：全量统计与现算一致",
@@ -365,17 +370,23 @@ if (DATA) {
     eq("首页：外链卡片新标签打开", card && card.getAttribute("target"), "_blank");
     ok("首页：外链卡片带 noopener", !!card && /noopener/.test(card.getAttribute("rel") || ""));
     ok("首页：卡片显示标题", !!card && card.querySelector(".ct").textContent.includes(ext.title));
-    eq("首页：卡片列出全部要点", card ? card.querySelectorAll(".pts li").length : -1, ext.points.length);
+    eq("首页：卡片列出全部关键词", card ? card.querySelectorAll(".tgs .tg").length : -1, ext.tags.length);
+    eq("首页：卡片不放长要点列表", card ? card.querySelectorAll(".pts li").length : -1, 0);
+    ok("首页：卡片显示的是摘要那一段", !!card && card.querySelector(".cs").textContent.includes(ext.summary.slice(0, 12)));
+    ok("首页：关键词是 span 不是链接（卡片本身就是 <a>，锚点不能套锚点）",
+      !!card && card.querySelectorAll(".tgs a").length === 0);
     ok("首页：卡片有「打开原文」提示", !!card && !!card.querySelector(".cf .go"));
     ok("首页：外链卡片不显示字数/阅读时长",
       !!card && !/[\d,]+\s*字/.test(card.querySelector(".cf").textContent),
       card && card.querySelector(".cf").textContent);
-    // 上面只盯了第一份资料；这里逐份过一遍 —— 新加一张卡片时要点不能漏渲染
+    // 上面只盯了第一份资料；这里逐份过一遍 —— 新加一张卡片时关键词不能漏渲染
     calc.extArts.forEach((ex) => {
       const c = $(`.cards .card[href="${ex.url}"]`);
       ok(`首页：「${ex.title.slice(0, 22)}…」卡片在列`, !!c);
-      eq("首页：该卡片要点数 = meta.points 数",
-        c ? c.querySelectorAll(".pts li").length : -1, ex.points.length);
+      eq("首页：该卡片关键词数 = meta.tags 数",
+        c ? c.querySelectorAll(".tgs .tg").length : -1, ex.tags.length);
+      eq("首页：该卡片摘要与数据一致",
+        c ? c.querySelector(".cs").textContent.trim() : "", ex.summary);
     });
     // —— 侧栏：外链资料不进分类树，改由「我的收藏」入口承载（否则与分类重复）
     ok("侧栏：外链资料不在分类树里（已由「我的收藏」入口承载）",
@@ -386,11 +397,14 @@ if (DATA) {
     eq("分类页：外链项 href 指向原文", catA && catA.getAttribute("href"), ext.url);
     eq("分类页：外链项新标签打开", catA && catA.getAttribute("target"), "_blank");
     eq("分类页：标题为该分类名", $(".hero h1").textContent, catNameOf(ext.cat));
-    // —— 搜索：摘要/要点必须进索引，否则外链条目搜不到
-    const kw = "逆深度";
+    // —— 搜索：摘要与关键词必须进索引，否则外链条目搜不到
+    const kw = "光度误差";
     const hits = await search(kw);
-    ok(`搜索「${kw}」命中外链条目（摘要/要点已进索引）`,
+    ok(`搜索「${kw}」命中外链条目（摘要已进索引）`,
       hits.some((el) => el.getAttribute("href") === ext.url), `${hits.length} 条命中`);
+    const hits2 = await search(ext.tags[ext.tags.length - 1]);
+    ok("搜索「" + ext.tags[ext.tags.length - 1] + "」命中外链条目（关键词已进索引）",
+      hits2.some((el) => el.getAttribute("href") === ext.url), `${hits2.length} 条命中`);
     // —— 路由兜底：手输 #/a/<外链id>，应把原文送出去而不是渲染空的正文页
     let opened = null;
     const realOpen = window.open;
