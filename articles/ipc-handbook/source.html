@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPC 数据下载与清洗手册</title>
+<style>
+:root{
+  --bg:#ffffff; --bg2:#f7f7f5; --code-bg:#f5f5f2;
+  --text:#1f1f1d; --muted:#6b6b66; --border:#e4e3de;
+  --accent:#185FA5; --note-bg:#fdf8ee; --note-br:#BA7517; --note-fg:#4a3a1a;
+  --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"PingFang SC",monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.78 var(--sans);
+  -webkit-text-size-adjust:100%;word-wrap:break-word}
+.wrap{max-width:880px;margin:0 auto;padding:0 20px 72px}
+header.hero{padding:44px 0 26px;border-bottom:1px solid var(--border)}
+header.hero h1{font-size:25px;line-height:1.35;margin:0 0 10px;font-weight:600;letter-spacing:-.2px}
+header.hero .sub{color:var(--muted);font-size:15px;margin:0}
+.facts{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.facts span{background:var(--bg2);border:1px solid var(--border);border-radius:999px;
+  padding:4px 12px;font-size:13px;color:var(--muted)}
+nav.toc{margin:26px 0 8px}
+nav.toc details{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px 18px}
+nav.toc summary{cursor:pointer;font-weight:600;font-size:15px;list-style:none;color:var(--accent)}
+nav.toc summary::-webkit-details-marker{display:none}
+nav.toc summary::before{content:"目录";}
+nav.toc[open]{}
+nav.toc ol{list-style:none;margin:10px 0 0;padding-left:0}
+nav.toc ol ol{margin:2px 0 6px;padding-left:16px}
+nav.toc li{margin:2px 0}
+nav.toc a{color:var(--text);text-decoration:none;font-size:14px;display:inline-block;padding:2px 0}
+nav.toc a.lvl1{color:var(--accent);font-weight:600;font-size:14.5px;margin-top:6px}
+nav.toc ol ol a{color:var(--muted)}
+nav.toc a:hover{text-decoration:underline}
+section.part{margin-top:44px}
+section.part.first{margin-top:32px}
+section.part + section.part{border-top:2px solid var(--accent);padding-top:14px}
+h1.part-title{font-size:21px;margin:0 0 6px;font-weight:600;color:var(--accent)}
+p.part-lead{color:var(--muted);font-size:14.5px;margin:0 0 8px;
+  padding-bottom:14px;border-bottom:1px solid var(--border)}
+h2{font-size:19px;margin:38px 0 12px;font-weight:600;line-height:1.45;
+  padding-left:12px;border-left:3px solid var(--accent)}
+h3{font-size:16.5px;margin:26px 0 8px;font-weight:600}
+h4{font-size:15px;margin:20px 0 6px;font-weight:600;color:var(--muted)}
+p{margin:10px 0}
+ul,ol{margin:10px 0;padding-left:24px}
+li{margin:4px 0}
+a{color:var(--accent)}
+strong{font-weight:600}
+hr{border:none;border-top:1px solid var(--border);margin:34px 0}
+code{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;
+  padding:1px 5px;font-family:var(--mono);font-size:13.5px}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;
+  padding:14px 16px;overflow-x:auto;margin:14px 0;-webkit-overflow-scrolling:touch}
+pre code{background:none;border:none;padding:0;font-size:13px;line-height:1.65;font-family:var(--mono)}
+blockquote{margin:16px 0;padding:12px 18px;background:var(--note-bg);
+  border-left:3px solid var(--note-br);border-radius:0 10px 10px 0;color:var(--note-fg)}
+blockquote p{margin:6px 0}
+blockquote code{background:#fff6e6;border-color:#e8d5ae}
+.tw{overflow-x:auto;margin:16px 0;border:1px solid var(--border);border-radius:10px;
+  -webkit-overflow-scrolling:touch}
+.tw::-webkit-scrollbar{height:7px}
+.tw::-webkit-scrollbar-thumb{background:#cfcec8;border-radius:4px}
+.tw::-webkit-scrollbar-track{background:transparent}
+table{border-collapse:collapse;width:100%;font-size:14px}
+/* 手机上给表格一个最小宽度：否则 width:100% 会把单元格挤成竖排窄条，
+   永远不触发横滑。桌面端容器够宽，不受影响。 */
+@media(max-width:700px){table{min-width:520px}}
+th,td{padding:9px 13px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+th{background:var(--bg2);font-weight:600;white-space:nowrap;font-size:13.5px}
+tbody tr:last-child td{border-bottom:none}
+.cb{display:inline-block;width:12px;height:12px;border:1.5px solid #b9b8b2;
+  border-radius:3px;margin-right:7px;vertical-align:-1px}
+.cb-on{background:var(--accent);border-color:var(--accent)}
+footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--border);
+  color:var(--muted);font-size:13px}
+@media(max-width:620px){
+  body{font-size:15px}
+  .wrap{padding:0 16px 56px}
+  header.hero{padding:30px 0 20px}
+  header.hero h1{font-size:20px}
+  h2{font-size:17px;margin:30px 0 10px}
+  h3{font-size:15.5px}
+  table{font-size:13px}
+  th,td{padding:8px 10px}
+  pre{padding:12px}
+  pre code{font-size:12px}
+  ul,ol{padding-left:20px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="hero">
+  <h1>IPC 分类表数据集：下载与清洗手册</h1>
+  <p class="sub">从国知局 8 部 PDF 到 78,449 个结构化节点 —— 完整思路、踩坑复盘与下次的操作手册</p>
+  <div class="facts">
+    <span>8 部 PDF</span>
+    <span>1,890 页</span>
+    <span>78,449 节点</span>
+    <span>自检 8 项全绿</span>
+    <span>IPC 2026.01</span>
+  </div>
+</header>
+<nav class="toc"><details open><summary></summary>
+<ol class="toc-root"><li><a href="#part-1" class="lvl1">第一部分 · 通用 SOP</a><ol><li><a href="#p1-0-5">0. 先做决策：走哪条路（5 分钟）</a><ol><li><a href="#p1-_1">探测脚本（直接跑，别改）</a></li></ol></li><li><a href="#p1-1">1. 五个阶段</a></li><li><a href="#p1-2-stage-0">2. Stage 0：格式侦察报告</a><ol><li><a href="#p1-_2">侦察脚本骨架</a></li><li><a href="#p1-6">🔑 问题 6 为什么最重要</a></li></ol></li><li><a href="#p1-3-stage-1">3. Stage 1：下载</a></li><li><a href="#p1-4-stage-2-4">4. Stage 2：清洗 = 4 层纯函数</a><ol><li><a href="#p1-_3">每层的职责边界（不要混）</a></li><li><a href="#p1-2merge_lines">②merge_lines 的设计要点（最容易写错的一层）</a></li><li><a href="#p1-3parse_dept">③parse_dept 的设计要点（行状态机）</a></li><li><a href="#p1-4build">④build 的设计要点（层级）</a></li></ol></li><li><a href="#p1-5-stage-3">5. Stage 3：自检 = 数字断言</a><ol><li><a href="#p1-_4">为什么要算&quot;理论值&quot;</a></li><li><a href="#p1-error-warn">error / warn 分级</a></li><li><a href="#p1-_5">&quot;源缺失&quot;还是&quot;我抽取丢了&quot;？用交叉验证定责</a></li></ol></li><li><a href="#p1-6-stage-4">6. Stage 4：抽样验收</a></li><li><a href="#p1-7">7. 通用陷阱速查表</a></li><li><a href="#p1-8">8. 下次的行动清单</a></li><li><a href="#p1-9-sop-ipc">9. 本项目对照表（把 SOP 映射到 IPC 代码）</a></li></ol></li><li><a href="#part-2" class="lvl1">第二部分 · 踩坑复盘</a><ol><li><a href="#p2-0">0. 一页速览</a></li><li><a href="#p2-1">1. 下载链路</a><ol><li><a href="#p2-1-1-2165">坑 1-1 页面只回来 2165 字节（★ 最隐蔽）</a></li><li><a href="#p2-1-2-waf-ua-referer">坑 1-2 WAF 需要 UA + Referer</a></li><li><a href="#p2-1-3">坑 1-3 链接别硬编码</a></li></ol></li><li><a href="#p2-2">2. 解析清洗</a><ol><li><a href="#p2-0_1">阶段 0：先侦察，再动手（这一步不能省）</a></li><li><a href="#p2-2-1">坑 2-1 同一种节点有两种排版</a></li><li><a href="#p2-2-2">坑 2-2 折行把分类号顶到行首 → 假条目（★ 最贵）</a></li><li><a href="#p2-2-3-bug-bug">坑 2-3 🔥 修 bug 引入更大的 bug：过度合并（★ 最值得记住）</a></li><li><a href="#p2-2-4">坑 2-4 父子关系不能用分类号数值推</a></li><li><a href="#p2-2-5-section">坑 2-5 部（section）节点不能靠正文建</a></li><li><a href="#p2-2-6">坑 2-6 附注区 / 小类索引区里全是&quot;分类号&quot;，但都不是条目</a><ol><li><a href="#p2-a">(a) 小类索引 —— 意外的官方礼物 🎁</a></li><li><a href="#p2-b">(b) 跨类目对照索引 —— 伪装成小类的假条目</a></li><li><a href="#p2-c-4">(c) 附注的 4 种写法</a></li><li><a href="#p2-d">(d) 附注正文里的分类号引用：全角空格是关键判据</a></li><li><a href="#p2-e">(e) 区域状态机 + &quot;重复出现即引用&quot;</a></li><li><a href="#p2-f">(f) 两道归属校验（缺一不可）</a></li></ol></li><li><a href="#p2-2-7">坑 2-7 标题里混进&quot;没有标记的说明文字&quot;</a></li><li><a href="#p2-8-pdf">已知数据缺口：8 个节点标题在源 PDF 里就是空的</a></li></ol></li><li><a href="#p2-3">3. 数字演进表：每一次修复都有量化证据（★ 教学核心）</a></li><li><a href="#p2-4">4. 可迁移的六条方法论</a><ol><li><a href="#p2-1_1">① 先侦察，再写代码</a></li><li><a href="#p2-2_1">② 局部样本能验证&quot;可行性&quot;，不能定&quot;形态分布&quot;</a></li><li><a href="#p2-3_1">③ 用计数断言替代肉眼判断</a></li><li><a href="#p2-4_1">④ 每次修改后立刻重新量化（防过度修复）</a></li><li><a href="#p2-5">⑤ 交叉验证来定位&quot;责任边界&quot;</a></li><li><a href="#p2-6">⑥ 幂等 + 可追溯</a></li></ol></li><li><a href="#p2-5_1">5. 自检清单（重跑时看这张表）</a></li><li><a href="#p2-6_1">6. 附：一个业务层面的发现</a></li></ol></li></ol>
+</details></nav>
+<main>
+<section class="part first" id="part-1"><h1 class="part-title">第一部分 · 通用 SOP</h1><p class="part-lead">下次做同类任务时照着做的操作手册：怎么判断路线、五个阶段、每层的设计要点、陷阱速查表。</p><blockquote>
+<p>面向"官方文档 / 年报 / 标准 / 分类表 / 法规"这类<strong>排版不规整但内容有结构</strong>的 PDF。
+本文是<strong>操作手册</strong>（下次照着做）；踩坑细节见 <code>踩坑与解决方案.md</code>。
+案例来源：国知局 IPC 分类表 8 部 PDF → 78,449 节点。</p>
+</blockquote>
+<hr />
+<h2 id="p1-0-5">0. 先做决策：走哪条路（5 分钟）</h2>
+<p><strong>别急着写解析代码。</strong> 先花 5 分钟回答三个问题，它们决定后面所有工作量：</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>问题</th>
+<th>怎么答</th>
+<th>影响</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>① 有没有文本层？</strong></td>
+<td>抽一页看字数；看 PDF 元数据 <code>Producer</code></td>
+<td>没有 → 必须 OCR（MinerU / DeepDoc / TextIn），工作量 ×3</td>
+</tr>
+<tr>
+<td><strong>② 排版规整吗？</strong></td>
+<td><code>Producer</code> 是谁</td>
+<td><code>Microsoft Excel/Word</code> → 大概率规整但有怪癖；扫描件 → OCR</td>
+</tr>
+<tr>
+<td><strong>③ 层级怎么表达？</strong></td>
+<td>看缩进 / 点号 / 编号</td>
+<td>显式编码（点号、缩进）→ 可解析；纯靠视觉缩进 → 需版面还原</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="p1-_1">探测脚本（直接跑，别改）</h3>
+<pre><code class="language-python">from pypdf import PdfReader
+
+r = PdfReader(&quot;sample.pdf&quot;)
+print(&quot;页数:&quot;, len(r.pages))
+print(&quot;元数据:&quot;, dict(r.metadata or {}))          # ← Producer 是关键线索
+
+for i in [0, 1, len(r.pages) // 2]:              # 首页 / 次页 / 中间页
+    t = r.pages[i].extract_text() or &quot;&quot;
+    print(f&quot;\n===== page {i+1}  len={len(t)} =====&quot;)
+    print(repr(t[:500]))                          # ← repr 才看得到全角空格/制表符
+</code></pre>
+<p><strong>判读</strong>：</p>
+<ul>
+<li><code>len(t)</code> 接近 0 或全是乱码符号 → <strong>无文本层</strong>，转 OCR</li>
+<li><code>len(t)</code> 正常、中文可读 → 有文本层，进入解析路线</li>
+<li>元数据里 <code>Producer: Microsoft Office Excel 2007</code> → <strong>原始文件是从 Excel 导出的</strong>，
+  意味着：文本层完整，但<strong>单元格宽度会决定换行位置</strong> → 排版必然不规整</li>
+</ul>
+<blockquote>
+<p>⚠️ 用 <code>repr()</code> 而不是 <code>print()</code>。全角空格 <code>\u3000</code>、制表符、零宽字符在终端里<strong>看不见</strong>，
+而它们往往是后面最致命的判据。</p>
+</blockquote>
+<hr />
+<h2 id="p1-1">1. 五个阶段</h2>
+<pre><code>Stage 0  侦察      ── 摸清格式，产出&quot;格式侦察报告&quot;
+Stage 1  下载      ── 拿到原始文件 + 可追溯清单
+Stage 2  清洗      ── 4 层纯函数，逐层转换
+Stage 3  自检      ── 数字断言，error / warn 分级
+Stage 4  抽样验收  ── 人工核对，交付
+</code></pre>
+<p><strong>铁律：不要跳 Stage 0。</strong> 我在 IPC 项目上如果在 H 部之外没做全量形态统计，
+后面所有正则都会建立在错误假设上。</p>
+<hr />
+<h2 id="p1-2-stage-0">2. Stage 0：格式侦察报告</h2>
+<p><strong>目标</strong>：用数据回答下面 6 个问题，写成一份可以给自己看的报告。</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>问题</th>
+<th>为什么必须问</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>有几种"节点行"形态？各多少？</td>
+<td>决定用同行正则还是行状态机</td>
+</tr>
+<tr>
+<td>2</td>
+<td>层级怎么表达？连续吗？</td>
+<td>决定父子关系怎么建</td>
+</tr>
+<tr>
+<td>3</td>
+<td>条目被折行了吗？折几种？</td>
+<td>决定要不要 merge 层</td>
+</tr>
+<tr>
+<td>4</td>
+<td>夹带了哪些"非条目"内容？</td>
+<td>索引 / 附注 / 跨类目表会伪装成条目</td>
+</tr>
+<tr>
+<td>5</td>
+<td>页眉页脚长什么样？</td>
+<td>必须精确剔除，否则混进标题</td>
+</tr>
+<tr>
+<td>6</td>
+<td><strong>全文搜目标业务词，命中几次？</strong></td>
+<td>提前否掉错误的技术路线</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="p1-_2">侦察脚本骨架</h3>
+<pre><code class="language-python">import re
+from collections import Counter
+from pypdf import PdfReader
+
+HEAD = re.compile(r&quot;^页眉的样子$&quot;)
+FOOT = re.compile(r&quot;^页脚的样子$&quot;)
+
+lines = []
+for p in PdfReader(&quot;sample.pdf&quot;).pages:
+    for ln in (p.extract_text() or &quot;&quot;).split(&quot;\n&quot;):
+        if ln.strip() and not HEAD.match(ln) and not FOOT.match(ln):
+            lines.append(ln.rstrip())
+
+# 问题 1：形态统计 —— 先假设几种候选正则，统计各自命中数
+CANDS = {
+    &quot;形态A(同行带标题)&quot;: re.compile(r&quot;^CODE\s+\S&quot;),
+    &quot;形态B(号独占行)&quot;:   re.compile(r&quot;^CODE$&quot;),
+}
+for name, pat in CANDS.items():
+    hits = [l for l in lines if pat.match(l)]
+    print(f&quot;{name}: {len(hits)}&quot;)
+    for l in hits[:3]:
+        print(&quot;   &quot;, repr(l[:80]))
+
+# 问题 3：折行检测 —— 上一行没说完就换行
+BREAK_TAIL = re.compile(r&quot;[，、；,;：:）)]\s*$&quot;)
+trunc = [l for l in lines if BREAK_TAIL.search(l)]
+print(f&quot;\n疑似折断续行: {len(trunc)}&quot;)
+for l in trunc[:5]:
+    print(&quot;   &quot;, repr(l[-60:]))
+
+# 问题 4：非条目内容
+for kw in [&quot;索引&quot;, &quot;附注&quot;, &quot;注&quot;]:
+    print(f&quot;含「{kw}」的行: {sum(1 for l in lines if kw in l)}&quot;)
+
+# 问题 6：业务词语料探测（最重要的一步，见下）
+txt = &quot;\n&quot;.join(lines)
+for w in [&quot;物联网&quot;, &quot;传感器&quot;, &quot;智能&quot;]:
+    print(f&quot;  {w} -&gt; {txt.count(w)} 次&quot;)
+</code></pre>
+<h3 id="p1-6">🔑 问题 6 为什么最重要</h3>
+<p>在 IPC 项目里，这一步<strong>直接否掉了两条技术路线</strong>：</p>
+<pre><code>H 部全文搜「物联网」→ 0 次命中
+但正确答案在里面：H04L67/12「适用于…传感器网络、汽车网络或远程计量网络」
+</code></pre>
+<p>→ 结论：<strong>纯关键词检索不可行（0 命中），训分类器也不可行（无标注 + 7.8 万类）</strong>。
+必须走「LLM 概念桥接 + 检索召回 + cross-encoder 重排」。</p>
+<blockquote>
+<p><strong>清洗前顺手做一次目标场景的语料探测，能提前否掉错误的技术路线。</strong>
+这一步成本 1 分钟，收益可能是几周。</p>
+</blockquote>
+<hr />
+<h2 id="p1-3-stage-1">3. Stage 1：下载</h2>
+<p><strong>7 条动作</strong>，逐条都对应一个踩过的坑：</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>动作</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>链接从页面实时解析</strong>，不硬编码</td>
+<td>附件 URL 常带 hash，改版即失效</td>
+</tr>
+<tr>
+<td>2</td>
+<td>带 <code>User-Agent</code> + 页面 URL 作 <code>Referer</code></td>
+<td>政府站 WAF 会挡裸请求</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>检测 gzip 并手动解压</strong></td>
+<td><code>urllib</code> 不自动解压；curl 会——所以 curl 测试会骗你</td>
+</tr>
+<tr>
+<td>4</td>
+<td>记录<strong>字节数 / md5 / 页数</strong></td>
+<td>可判定"源文件是否变过"，可复现</td>
+</tr>
+<tr>
+<td>5</td>
+<td>脚本<strong>幂等</strong>：已存在则跳过，<code>--force</code> 重下</td>
+<td>反复重跑不心疼</td>
+</tr>
+<tr>
+<td>6</td>
+<td>存储路径<strong>按语义命名</strong>（<code>A.pdf</code> 而非 hash）</td>
+<td>后面代码好读</td>
+</tr>
+<tr>
+<td>7</td>
+<td>写 <code>downloads.json</code> 清单</td>
+<td>交付时可追溯</td>
+</tr>
+</tbody>
+</table></div>
+<pre><code class="language-python">import gzip, hashlib, urllib.request
+
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 直连，不走代理
+UA = &quot;Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36&quot;
+
+def fetch(url, referer=None, timeout=180) -&gt; bytes:
+    req = urllib.request.Request(url)
+    req.add_header(&quot;User-Agent&quot;, UA)
+    req.add_header(&quot;Accept&quot;, &quot;*/*&quot;)
+    req.add_header(&quot;Accept-Language&quot;, &quot;zh-CN,zh;q=0.9&quot;)
+    if referer:
+        req.add_header(&quot;Referer&quot;, referer)
+    with OPENER.open(req, timeout=timeout) as resp:
+        data = resp.read()
+    if data[:2] == b&quot;\x1f\x8b&quot;:            # ← 站点强制 gzip，urllib 不会自动解压
+        data = gzip.decompress(data)
+    return data
+</code></pre>
+<hr />
+<h2 id="p1-4-stage-2-4">4. Stage 2：清洗 = 4 层纯函数</h2>
+<p><strong>核心设计：把清洗拆成 4 个独立可测的纯函数层。</strong> 每层只做一件事，
+输入输出都是简单类型，可以单独拿出来跑、单独写断言。</p>
+<pre><code>raw/A.pdf
+   │
+   │  ① read_lines   去页眉页脚 + 按页顺序取行
+   ▼
+list[str]  物理行        13864 行
+   │
+   │  ② merge_lines  折行拼接（只拦&quot;会造成假条目&quot;的行）
+   ▼
+list[str]  逻辑行        13773 行      ← 两者都打印，用来抓&quot;过度合并&quot;
+   │
+   │  ③ parse_dept   行状态机 → 节点
+   ▼
+list[dict] 原始节点      {code, kind, dot_level, title, notes, index}
+   │
+   │  ④ build        补 parent / ancestors / title_path
+   ▼
+list[dict] 成品节点      78449 个
+</code></pre>
+<h3 id="p1-_3">每层的职责边界（不要混）</h3>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>层</th>
+<th>只做</th>
+<th>绝不做</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>① <code>read_lines</code></td>
+<td>剔除页眉页脚；捕获版本号</td>
+<td>不做任何合并、不做判断</td>
+</tr>
+<tr>
+<td>② <code>merge_lines</code></td>
+<td>处理"折行造成的假条目"</td>
+<td>不解析结构、不识别节点类型</td>
+</tr>
+<tr>
+<td>③ <code>parse_dept</code></td>
+<td>行状态机；区分条目 / 附注 / 索引</td>
+<td><strong>不算父子关系</strong></td>
+</tr>
+<tr>
+<td>④ <code>build</code></td>
+<td>用点号层级 + 出现顺序建父子链</td>
+<td>不改标题、不重新分词</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="p1-2merge_lines">②<code>merge_lines</code> 的设计要点（最容易写错的一层）</h3>
+<p><strong>触发条件要收紧到最小</strong>：</p>
+<pre><code class="language-python">def merge_lines(lines: list[str]) -&gt; list[str]:
+    &quot;&quot;&quot;只拦截【以分类号开头】的行 —— 因为只有它们会被误认成新条目。&quot;&quot;&quot;
+    out = []
+    for raw in lines:
+        s = raw.strip()
+        if out:
+            prev = out[-1]
+            # 分支 A：编号被从中间切开（'E04D13/03' + '5 ..' → 'E04D13/035'）
+            #         注意【不加空格】，两截本属同一个串
+            if RE_BARE_CODE.match(prev) and RE_SPLIT_TAIL.match(s):
+                out[-1] = f&quot;{prev}{s}&quot;
+                continue
+            # 分支 B：当前行以编号开头，但其实是上一行折下来的尾巴
+            if RE_CODE_START.match(s):
+                unbalanced = prev.count(&quot;（&quot;) &gt; prev.count(&quot;）&quot;) or prev.count(&quot;(&quot;) &gt; prev.count(&quot;)&quot;)
+                if unbalanced or prev.endswith((&quot;，&quot;, &quot;,&quot;, &quot;；&quot;, &quot;;&quot;, &quot;、&quot;)):
+                    out[-1] = f&quot;{prev} {s}&quot;
+                    continue
+        out.append(s)
+    return out
+</code></pre>
+<p><strong>三条心法</strong>：</p>
+<ol>
+<li><strong>不要对所有行做"续行判断"</strong> —— 会<strong>连锁吞并</strong>（并入的行自身又以标点结尾，于是继续吞下一行）。
+   实测把 A 部 13864 行压成 1374 行、E 部 4819 行压成 70 行。</li>
+<li><strong>判据要能从"正当性"推导</strong>：断句标点 <code>，、；</code> 可以放心收，因为
+   <strong>真正的条目行一律以 <code>[yyyy.mm]</code> 版本号结尾，不会以标点结尾</strong>。</li>
+<li><strong>每层都打印行数</strong>。这是抓住过度合并的唯一手段。</li>
+</ol>
+<h3 id="p1-3parse_dept">③<code>parse_dept</code> 的设计要点（行状态机）</h3>
+<pre><code class="language-python">mode = &quot;idle&quot;          # idle | title | notes | index
+cur  = None            # 当前节点
+buf  = []              # 标题缓冲（同行标题也当第一条）
+</code></pre>
+<ul>
+<li><strong>遇到结构行 → <code>commit()</code> 落盘当前节点，再 <code>start()</code> 新节点</strong></li>
+<li><strong>非结构行 → 按 <code>mode</code> 归集</strong>（标题 / 附注 / 索引）</li>
+</ul>
+<p>必须处理的三类"伪装者"：</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>伪装者</th>
+<th>长相</th>
+<th>判据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>索引条目</td>
+<td>编号后跟<strong>组号或另一编号</strong>（不是中文标题）</td>
+<td>看编号后紧跟的是不是 <code>\d+/\d+</code> 或 <code>[A-H]\d{2}</code></td>
+</tr>
+<tr>
+<td>附注正文里的引用</td>
+<td><code>H02P6/26　优先于…</code></td>
+<td><strong>编号后是全角空格 <code>\u3000</code></strong>——真条目一律半角</td>
+</tr>
+<tr>
+<td>已定义过的编号</td>
+<td>同一个编号第二次出现</td>
+<td>编号在正文里<strong>只定义一次</strong>，再出现必是引用</td>
+</tr>
+</tbody>
+</table></div>
+<p>再加<strong>两道归属校验</strong>（缺一不可）：</p>
+<pre><code class="language-python"># ① 编号前缀必须与当前文件所属大类一致（跨篇引用只可能出现在正文里）
+m.group(1)[0] == self_prefix
+# ② 条目必须属于当前所处的小类（小类下所有条目都以该小类号开头）
+m.group(1)[:4] == cur_subclass
+</code></pre>
+<h3 id="p1-4build">④<code>build</code> 的设计要点（层级）</h3>
+<p><strong>唯一依据：缩进层级（点号个数）+ 出现顺序。</strong></p>
+<pre><code class="language-python"># ✅ 正确：取「层级 &lt;= 当前层级」的【最深】祖先
+key = max((k for k in stack if k &lt;= dl), default=None)
+parent = stack[key] if key is not None else None
+stack = {k: v for k, v in stack.items() if k &lt; dl + 1}
+stack[dl + 1] = n
+</code></pre>
+<p>两个陷阱：</p>
+<ul>
+<li>❌ <strong>不要用编号数值推父级</strong>（<code>1/02</code> 的父级不一定是 <code>1/01</code>）</li>
+<li>❌ <strong>不要用 <code>stack[max(stack)]</code> 兜底</strong> —— 层级会跳号（实测有从 0 直接跳到 2 的），
+  这会把<strong>同级</strong>节点串成父子链（实测串出 31 层假层级）</li>
+</ul>
+<hr />
+<h2 id="p1-5-stage-3">5. Stage 3：自检 = 数字断言</h2>
+<p><strong>原则：所有判断都来自可复现的数字，不靠肉眼。</strong></p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>检查项</th>
+<th>判据</th>
+<th>分级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>重复编号</td>
+<td>编号唯一（<code>Counter</code> 后取 &gt;1 的）</td>
+<td>error</td>
+</tr>
+<tr>
+<td>孤儿节点</td>
+<td>每个 <code>parent</code> 都存在于集合里</td>
+<td>error</td>
+</tr>
+<tr>
+<td>层级链断裂</td>
+<td>非根节点必须有 <code>ancestors</code></td>
+<td>error</td>
+</tr>
+<tr>
+<td><strong>最大祖先链深度</strong></td>
+<td><strong>等于理论值</strong>（本项目 = 12）</td>
+<td>error</td>
+</tr>
+<tr>
+<td>标题混入页眉</td>
+<td>任一标题不含页眉文本</td>
+<td>error</td>
+</tr>
+<tr>
+<td>空标题节点</td>
+<td>见下方"源缺失 vs 解析缺陷"</td>
+<td><strong>warn</strong></td>
+</tr>
+<tr>
+<td>无子节点的中间层节点</td>
+<td>（本项目 = 0）</td>
+<td>error</td>
+</tr>
+<tr>
+<td>标题异常长</td>
+<td>超过阈值（本项目 &gt;180 字）</td>
+<td>warn</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="p1-_4">为什么要算"理论值"</h3>
+<p>「最大祖先链深度 = 12」这个数字是<strong>可以事先推导的</strong>：
+<code>部 / 大类 / 小类 / 大组 + 8 级小组 = 12</code>。
+所以它是<strong>硬判据</strong>——超出就是错，不需要人判断。<strong>能算理论值的指标最有价值。</strong></p>
+<h3 id="p1-error-warn">error / warn 分级</h3>
+<pre><code class="language-python">def add(name, value, ok, detail=&quot;&quot;, severity=&quot;error&quot;):
+    ...
+
+return 0 if all(c[&quot;ok&quot;] for c in checks if c[&quot;severity&quot;] == &quot;error&quot;) else 2
+</code></pre>
+<blockquote>
+<p><strong>源数据本身的问题不该让流水线红掉，但必须被看见。</strong>
+本项目有 8 个节点标题在源 PDF 里就是空的 → 标 <code>warn</code>，退出码只由 <code>error</code> 决定。</p>
+</blockquote>
+<h3 id="p1-_5">"源缺失"还是"我抽取丢了"？用交叉验证定责</h3>
+<p><strong>别猜，用两条独立证据</strong>：</p>
+<ol>
+<li><strong>换算法</strong>：用 <code>pypdf</code> 的 <code>extraction_mode="layout"</code>（按坐标排版抽取，与默认模式算法完全不同）复核 → 该行依然空</li>
+<li><strong>语义反证</strong>：按标准该有的关键词，<strong>全文搜零命中</strong>
+   （<code>C12N9/04</code> 应为"作用于 CH-OH 基团的氧化还原酶"，全文搜 <code>CH-OH</code> → 0 次）</li>
+</ol>
+<p>两条都指向"源文件缺内容" → 标 <code>warn</code> 放行，并在交付说明里点出来。</p>
+<hr />
+<h2 id="p1-6-stage-4">6. Stage 4：抽样验收</h2>
+<p>三类样本，缺一不可：</p>
+<ol>
+<li><strong>关键节点</strong>：过程中出过问题的每一处（本项目抽查 <code>C14B</code> / <code>B62J37/00</code> / <code>F41A</code> 等）</li>
+<li><strong>随机抽样</strong>：<code>random.seed(固定值)</code> + <code>random.sample(nodes, 10)</code>（<strong>固定种子，可复现</strong>）</li>
+<li><strong>结构统计</strong>：深度分布、父子比、空字段数</li>
+</ol>
+<hr />
+<h2 id="p1-7">7. 通用陷阱速查表</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>陷阱</th>
+<th>症状</th>
+<th>对策</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>HTTP 强制 gzip</strong></td>
+<td>响应体明显短一截、正则全都匹配不到</td>
+<td>检测 <code>\x1f\x8b</code> 头部并解压</td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>换客户端后默认行为变了</strong></td>
+<td>curl 好使、代码不好使</td>
+<td>检查解压/重定向/代理/超时四项差异</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>全角空格 / 全角斜杠</strong></td>
+<td>分裂出重复条目、匹配漏掉</td>
+<td><code>repr()</code> 看原文；把全角当<strong>判据</strong>用</td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>同一种节点多种排版</strong></td>
+<td>换页/换部就漏统计</td>
+<td>行状态机 + 标题部分设为可选</td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>折行把编号顶到行首</strong></td>
+<td>多出假条目，甚至抢走真编号</td>
+<td>merge 层，只拦"以编号开头"的行</td>
+</tr>
+<tr>
+<td>6</td>
+<td><strong>编号被从中间切开</strong></td>
+<td>出现半个编号 + 纯数字行</td>
+<td>拼接时<strong>不加空格</strong></td>
+</tr>
+<tr>
+<td>7</td>
+<td><strong>过度合并（修 bug 引入新 bug）</strong></td>
+<td>行数暴跌</td>
+<td>每层打印行数；触发条件收紧到最小</td>
+</tr>
+<tr>
+<td>8</td>
+<td><strong>用数值推父子关系</strong></td>
+<td>层级看起来对、深挖全错</td>
+<td>只用"层级 + 出现顺序"</td>
+</tr>
+<tr>
+<td>9</td>
+<td><strong>层级跳号</strong></td>
+<td>假深度爆炸</td>
+<td>取"层级 ≤ 当前的最深祖先"</td>
+</tr>
+<tr>
+<td>10</td>
+<td><strong>正文引用被当成条目</strong></td>
+<td>重复编号</td>
+<td>归属校验 ×2 + 重复即引用 + 全角空格</td>
+</tr>
+<tr>
+<td>11</td>
+<td><strong>索引区/附注区没隔离</strong></td>
+<td>凭空多出一批节点</td>
+<td>mode 状态机分区 + 区域结束条件</td>
+</tr>
+<tr>
+<td>12</td>
+<td><strong>页眉混进标题</strong></td>
+<td>标题里有页眉文字</td>
+<td>先剔页眉，<strong>再</strong>做折行合并（顺序不能反）</td>
+</tr>
+<tr>
+<td>13</td>
+<td><strong>根节点靠正文建</strong></td>
+<td>根节点数量对不上</td>
+<td>内置权威清单兜底</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="p1-8">8. 下次的行动清单</h2>
+<p><strong>开工前</strong></p>
+<ul>
+<li><span class=\"cb\"></span>跑探测脚本，确认有没有文本层（没有 → 转 OCR，工作量重估）</li>
+<li><span class=\"cb\"></span>看 <code>Producer</code>，判断是谁生成的、可能的排版怪癖</li>
+<li><span class=\"cb\"></span><strong>全量</strong>统计节点行形态（不要只测一个样本就说"我看懂了"）</li>
+<li><span class=\"cb\"></span>找"层级怎么表达"</li>
+<li><span class=\"cb\"></span><strong>全文搜目标业务词</strong>，评估检索/分类路线的可行性</li>
+<li><span class=\"cb\"></span>写一份"格式侦察报告"，把上面所有数字记下来</li>
+</ul>
+<p><strong>写代码时</strong></p>
+<ul>
+<li><span class=\"cb\"></span>下载脚本：链接实时解析 + UA/Referer + gzip 检测 + md5 清单 + 幂等</li>
+<li><span class=\"cb\"></span>清洗拆成 4 层纯函数：<code>read_lines</code> / <code>merge_lines</code> / <code>parse</code> / <code>build</code></li>
+<li><span class=\"cb\"></span><strong>每层打印输入输出行数/条数</strong></li>
+<li><span class=\"cb\"></span>折行合并的触发条件<strong>收紧到最小</strong></li>
+<li><span class=\"cb\"></span>父子关系只用"层级 + 顺序"</li>
+<li><span class=\"cb\"></span>三类伪装者判据齐备（索引 / 引用 / 全角空格）</li>
+</ul>
+<p><strong>交付前</strong></p>
+<ul>
+<li><span class=\"cb\"></span>自检清单全绿，<code>error</code> 级为 0</li>
+<li><span class=\"cb\"></span>源数据缺失的项标 <code>warn</code> 并在文档里点明</li>
+<li><span class=\"cb\"></span>关键节点 + 固定种子随机抽样各核对一遍</li>
+<li><span class=\"cb\"></span>写 README：产物格式、字段含义、重跑命令、已知问题</li>
+<li><span class=\"cb\"></span>脚本幂等，能反复重跑</li>
+</ul>
+<hr />
+<h2 id="p1-9-sop-ipc">9. 本项目对照表（把 SOP 映射到 IPC 代码）</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>SOP 阶段</th>
+<th>IPC 里的落点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stage 1 下载</td>
+<td><code>scripts/00_download.py</code></td>
+</tr>
+<tr>
+<td>Stage 2① 物理行</td>
+<td><code>read_lines()</code></td>
+</tr>
+<tr>
+<td>Stage 2② 逻辑行</td>
+<td><code>merge_lines()</code></td>
+</tr>
+<tr>
+<td>Stage 2③ 状态机</td>
+<td><code>parse_dept()</code> + <code>classify()</code> + <code>looks_like_index_entry()</code></td>
+</tr>
+<tr>
+<td>Stage 2④ 层级</td>
+<td><code>build()</code></td>
+</tr>
+<tr>
+<td>Stage 3 自检</td>
+<td><code>main()</code> 里的 <code>checks</code> 列表 → <code>data/ipc_meta.json</code></td>
+</tr>
+<tr>
+<td>Stage 4 抽样</td>
+<td>一次性脚本（见 <code>docs/踩坑与解决方案.md</code> 的验证片段）</td>
+</tr>
+<tr>
+<td>格式侦察报告</td>
+<td>本文档第 2 节 + <code>README.md</code> 的"解析要点"</td>
+</tr>
+</tbody>
+</table></div></section><section class="part" id="part-2"><h1 class="part-title">第二部分 · 踩坑复盘</h1><p class="part-lead">这次实际踩到的坑：现象、根因、怎么发现的、怎么修的、怎么验证的。</p><blockquote>
+<p>项目：<code>patent_dev/ipc/</code>　｜　数据源：国知局《国际专利分类表》2026.01 版（8 部 PDF）
+规模：1890 页 / 34.16 MB → <strong>78,449 个结构化节点</strong>
+这份文档记录<strong>每一步为什么会错、怎么发现的、怎么修的</strong>，可迁移到其他"非规整 PDF → 结构化数据"任务。</p>
+</blockquote>
+<hr />
+<h2 id="p2-0">0. 一页速览</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>环节</th>
+<th>坑数</th>
+<th>最贵的一个</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>下载链路</td>
+<td>3</td>
+<td>站点强制 gzip，<code>urllib</code> 不自动解压 → 页面"只有 2165 字节"</td>
+</tr>
+<tr>
+<td>解析清洗</td>
+<td>7</td>
+<td>折行把分类号顶到行首 → 假条目 + 抢占 code + 层级链断裂</td>
+</tr>
+<tr>
+<td>自我修复</td>
+<td>1</td>
+<td><strong>修 bug 引入更大的 bug</strong>：过度合并把 A 部 13864 行压成 1374 行</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>最终结果</strong>：8 项自检全绿，重复分类号 0、孤儿节点 0、层级链断裂 0、最大祖先链深度 12（理论值）。</p>
+<hr />
+<h2 id="p2-1">1. 下载链路</h2>
+<h3 id="p2-1-1-2165">坑 1-1　页面只回来 2165 字节（★ 最隐蔽）</h3>
+<p><strong>现象</strong></p>
+<p>下载脚本"跑通了"，但解析页面后找不到任何一个附件链接。日志显示响应体只有 <strong>2165 字节</strong>，而真实页面是 <strong>8310 字节</strong>。</p>
+<p><strong>根因</strong></p>
+<p>国知局站点对<strong>所有响应强制 gzip 压缩</strong>（<code>Content-Encoding: gzip</code>），而 Python <code>urllib</code> <strong>不会自动解压</strong>。拿到的是压缩后的字节流，<code>decode('utf-8')</code> 出来是乱码，正则自然一条都匹配不到。</p>
+<blockquote>
+<p>⚠️ 这个坑最坑的地方在于：<strong>同一个 URL 用 <code>curl</code> 测是好的</strong>——因为 curl 自带解压。所以"我先用 curl 验证一下"这个动作<strong>恰好会掩盖问题</strong>。</p>
+</blockquote>
+<p><strong>怎么发现的</strong></p>
+<p>打印响应头和响应体前几个字节：</p>
+<pre><code class="language-python">r = op.open(req, timeout=60)
+print(dict(r.headers))        # → 看到 Content-Encoding: gzip
+raw = r.read()
+print(len(raw), raw[:8])      # → 2269 b'\x1f\x8b\x08...'   ← gzip magic number
+</code></pre>
+<p><strong>修复</strong></p>
+<p>显式判断并解压：</p>
+<pre><code class="language-python">import gzip
+
+def fetch(url, referer=None, timeout=180) -&gt; bytes:
+    ...
+    data = resp.read()
+    # 站点强制 gzip，urllib 不会自动解压 —— 必须手动处理
+    if data[:2] == b&quot;\x1f\x8b&quot;:
+        data = gzip.decompress(data)
+    return data
+</code></pre>
+<p><strong>可迁移的一课</strong></p>
+<blockquote>
+<p>换 HTTP 客户端（curl → urllib / requests / httpx）时，<strong>默认行为差异</strong>（解压、重定向、代理、超时）是最容易翻车的地方。
+出现"内容明显短一截"时，<strong>先看响应头 + 看字节开头</strong>，别急着改正则。</p>
+</blockquote>
+<hr />
+<h3 id="p2-1-2-waf-ua-referer">坑 1-2　WAF 需要 UA + Referer</h3>
+<p><strong>现象</strong>：不带 <code>User-Agent</code> 直接请求，被挡。</p>
+<p><strong>修复</strong>：模拟浏览器请求头，且<strong>下载附件时把页面 URL 作为 <code>Referer</code></strong>：</p>
+<pre><code class="language-python">req.add_header(&quot;User-Agent&quot;, &quot;Mozilla/5.0 (Macintosh; ...) Chrome/120.0.0.0 Safari/537.36&quot;)
+req.add_header(&quot;Referer&quot;, &quot;https://www.cnipa.gov.cn/art/2025/12/31/art_3161_203422.html&quot;)
+</code></pre>
+<hr />
+<h3 id="p2-1-3">坑 1-3　链接别硬编码</h3>
+<p>附件 URL 是 <code>downfile.jsp?classid=0&amp;showname=2026.01版IPC分类表-A部.pdf&amp;filename=&lt;32位hash&gt;.pdf</code>——
+<strong>每次改版 hash 都会变</strong>。所以下载脚本的做法是：</p>
+<ol>
+<li>抓页面 → 解压 → 正则提取 8 个附件链接与 <code>showname</code></li>
+<li>从 <code>showname</code> 里解析出部名（A–H），落盘为 <code>raw/A.pdf … raw/H.pdf</code></li>
+<li>记录 <code>downloads.json</code>：来源 URL / 字节数 / <strong>md5</strong> / 页数</li>
+</ol>
+<p>好处：<strong>IPC 每年 1 月改版，脚本不用改</strong>；md5 让"源文件是否变过"可判定。</p>
+<hr />
+<h2 id="p2-2">2. 解析清洗</h2>
+<h3 id="p2-0_1">阶段 0：先侦察，再动手（这一步不能省）</h3>
+<p>在写任何解析代码之前，先做<strong>格式侦察</strong>。原因是：这批 PDF 由 <code>Microsoft Office Excel 2007</code> 导出
+（PDF 元数据里能直接看到），排版会非常不规整，而"不规整的形式"必须先被穷举出来。</p>
+<p>侦察脚本要回答的问题：</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>问题</th>
+<th>为什么关键</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>有没有文本层？中文乱码吗？</td>
+<td>决定是"解析"还是"OCR"</td>
+</tr>
+<tr>
+<td>节点行有多少种排版形态？各占多少？</td>
+<td>决定用同行正则还是行状态机</td>
+</tr>
+<tr>
+<td>层级是怎么表达的？</td>
+<td>决定父子关系怎么建</td>
+</tr>
+<tr>
+<td>有没有夹带别的东西（索引、附注、跨类目表）？</td>
+<td>决定要不要分区处理</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>结果</strong>（后来才补齐全库，这里也暴露了一个教训）：</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>形态</th>
+<th>同行带标题</th>
+<th>号独占一行</th>
+<th>合计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>大类（如 <code>H01</code>）</td>
+<td>83</td>
+<td>49</td>
+<td>132</td>
+</tr>
+<tr>
+<td>小类（如 <code>H01B</code>）</td>
+<td>120</td>
+<td>579</td>
+<td>699</td>
+</tr>
+<tr>
+<td>分类条目</td>
+<td>77,352</td>
+<td>2,003</td>
+<td>79,355</td>
+</tr>
+</tbody>
+</table></div>
+<blockquote>
+<p>🕳️ <strong>教训：只用 H 部做侦察，得到了"大类只有 49 个"的错误结论</strong>（而 IPC 实际有 ~130 个）。
+因为我当时<strong>默认大类一定是独占行</strong>，正则假设错了。后来全量跑才发现是 132 个。
+→ <strong>局部样本可以验证"能不能做"，但形态统计必须全量跑一遍</strong>。我在方案里就把这条列为 P0 的验收项。</p>
+</blockquote>
+<hr />
+<h3 id="p2-2-1">坑 2-1　同一种节点有两种排版</h3>
+<p><strong>现象</strong></p>
+<pre><code>H01                      ← 大类号独占一行，标题在下一行
+电气元件
+H02 发电、变电或配电      ← 大类号与标题同行
+</code></pre>
+<p><strong>根因</strong>：Excel 多单元格导出 PDF 时，单元格宽度不够就换行，宽度够就同行。<strong>同一部内都不统一</strong>。</p>
+<p><strong>修复</strong>：不能写"同行正则"，必须写<strong>行状态机</strong>——遇到结构行就把标题缓冲落到当前节点，
+非结构行按所处模式（标题 / 附注 / 小类索引）分别归集。</p>
+<pre><code class="language-python">RE_GROUP    = re.compile(r&quot;^([A-H]\d{2}[A-Z]\d{1,4})/(\d{2,6})(?:\s+(.*))?$&quot;)  # 标题可有可无
+RE_SUBCLASS = re.compile(r&quot;^([A-H]\d{2}[A-Z])(?:\s+(\S.*))?$&quot;)
+RE_CLASS    = re.compile(r&quot;^([A-H]\d{2})(?:\s+(\S.*))?$&quot;)
+</code></pre>
+<p>关键点：<strong>标题部分必须是可选的 <code>(?:\s+(...))?$</code></strong>，让"独占"和"同行"走同一个正则。</p>
+<hr />
+<h3 id="p2-2-2">坑 2-2　折行把分类号顶到行首 → 假条目（★ 最贵）</h3>
+<p><strong>现象</strong>：多出一批不该存在的节点。更严重的是它们会<strong>抢占真实分类号的 code</strong>。</p>
+<p>真实案例：B 部索引区里一个折行残片被当成 <code>C14B</code>，而 <code>build()</code> 按 A→H 顺序遍历并 <code>seen</code> 去重，
+于是 <strong>B 部的假 <code>C14B</code> 先占位，C 部的真 <code>C14B</code> 反而被丢弃</strong>，导致 <code>C14B1/00</code> 整条父子链断裂、变成孤儿节点。</p>
+<p><strong>4 种折行形态</strong>（都是从原文里挖出来的）</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>形态</th>
+<th>原文</th>
+<th>修复办法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>上一行括号未闭合</td>
+<td><code>D06F81/00 熨板（…橱柜入</code> ⏎ <code>A47B77/10 ）</code></td>
+<td>数括号是否配平</td>
+</tr>
+<tr>
+<td>2</td>
+<td>上一行以断句标点结尾</td>
+<td><code>…A01K41/00，</code> ⏎ <code>A01K45/00</code><br><code>…B62J31/00；B62J35/00；</code> ⏎ <code>B62J37/00</code></td>
+<td>看结尾标点</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>分类号被从中间切开</strong></td>
+<td><code>E04D13/03</code> ⏎ <code>5 .. 以具有可移动部件为特征的</code><br>（真身是 <code>E04D13/035</code>）</td>
+<td>裸小组号 + 纯数字开头的层级行</td>
+</tr>
+<tr>
+<td>4</td>
+<td>索引区里的裸分类号</td>
+<td><code>B63B34/00</code></td>
+<td>靠"区域状态"挡</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>修复</strong>：新增一道 <code>merge_lines()</code>，<strong>在结构解析之前</strong>把物理行合并成逻辑行。</p>
+<pre><code class="language-python">def merge_lines(lines):
+    out = []
+    for raw in lines:
+        s = raw.strip()
+        if out:
+            prev = out[-1]
+            # 分支 A：分类号被切开 —— 拼接时【不加空格】，两截本属同一个串
+            if RE_BARE_GROUP.match(prev) and RE_SPLIT_TAIL.match(s):
+                out[-1] = f&quot;{prev}{s}&quot;
+                continue
+            # 分支 B：当前行以分类号开头，但其实是上一行折下来的尾巴
+            if RE_CODE_START.match(s):
+                unbalanced = prev.count(&quot;（&quot;) &gt; prev.count(&quot;）&quot;) or prev.count(&quot;(&quot;) &gt; prev.count(&quot;)&quot;)
+                if unbalanced or prev.endswith((&quot;，&quot;, &quot;,&quot;, &quot;；&quot;, &quot;;&quot;, &quot;、&quot;)):
+                    out[-1] = f&quot;{prev} {s}&quot;
+                    continue
+        out.append(s)
+    return out
+</code></pre>
+<p><strong>为什么合并必须早于去页眉页脚之外的所有步骤</strong>：否则页眉会混进标题。</p>
+<hr />
+<h3 id="p2-2-3-bug-bug">坑 2-3　🔥 修 bug 引入更大的 bug：过度合并（★ 最值得记住）</h3>
+<p>这是整个过程里<strong>最有教学价值的一次翻车</strong>。</p>
+<p><strong>第一版规则</strong>（错）：对所有行判断"上一行没说完就并入下一行"。</p>
+<p><strong>后果</strong>：<strong>连锁吞并</strong>。并入的那一行自己又以标点结尾（IPC 标题大量以 <code>，；</code> 结尾），
+于是它继续吞下一行，一路吞下去：</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>部</th>
+<th>原始行</th>
+<th>合并后</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A</td>
+<td>13,864</td>
+<td><strong>1,374</strong></td>
+<td>数据基本报废</td>
+</tr>
+<tr>
+<td>E</td>
+<td>4,819</td>
+<td><strong>70</strong></td>
+<td>数据基本报废</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>为什么能快速发现</strong>：因为<strong>每一部都打印了"原始行数 → 逻辑行数"</strong>。
+A 部 13864 → 1374，这个数字<strong>肉眼一看就不对</strong>（10 倍的压缩率在"折行"场景里不可能）。</p>
+<p><strong>第二版规则</strong>（对）：把触发条件<strong>收紧到最小</strong>——</p>
+<blockquote>
+<p>合并<strong>只拦截"以分类号开头"的行</strong>。</p>
+</blockquote>
+<p>理由：
+- 不以分类号开头的续行（如 <code>H04</code> ⏎ <code>电通信技术</code>）本来就<strong>进不了节点</strong>，会在解析阶段自然落进标题缓冲，<strong>根本不需要在这里处理</strong>；
+- 而真正会造成"假条目"的，只有那些<strong>被误认成新条目</strong>的行 —— 它们必然以分类号开头。</p>
+<p><strong>断句标点该收哪些</strong>：<code>，、；</code> 三个可以放心收。因为 <strong>IPC 真正的条目行一律以 <code>[yyyy.mm]</code> 版本号结尾，绝不会以标点结尾</strong>，
+所以不存在"把两个相邻条目拼起来"的风险。</p>
+<blockquote>
+<p>⚠️ 这条规则在第一次收紧时<strong>漏了 <code>；</code></strong>（当时怕连锁吞并），结果小类索引区冒出大批假条目，
+<strong>E 部因此多出 59 个重复分类号</strong>。补上 <code>；</code> 之后重复数立刻降下来。→ 印证了"修复要回到证据，而不是靠感觉"。</p>
+</blockquote>
+<hr />
+<h3 id="p2-2-4">坑 2-4　父子关系不能用分类号数值推</h3>
+<p><strong>铁律</strong></p>
+<pre><code>H01B1/02 的父级【不是】H01B1/01，而是最近的一个&quot;更浅层级&quot;节点
+</code></pre>
+<p>IPC 的分类号是<strong>层级的编号</strong>，不是<strong>层级的关系</strong>。唯一可靠的依据是：
+<strong>点号个数（<code>.</code> 一级、<code>..</code> 二级、<code>...</code> 三级……）+ 出现顺序</strong>。</p>
+<p><strong>第二个陷阱</strong>：IPC <strong>点号层级不连续</strong>。实测存在从 0 直接跳到 2 的情况
+（例如 <code>C07K14/435</code> 后面直接跟点号为 2 的 <code>C07K14/76</code>）。</p>
+<p><strong>第一版兜底</strong>（错）：</p>
+<pre><code class="language-python">parent = stack.get(dl) or (stack[max(stack)] if stack else None)
+</code></pre>
+<p><code>stack[max(stack)]</code> 会<strong>把同级节点串成父子链</strong> —— 实测让 <code>C07K14</code> 下的 166 个节点
+串出了 <strong>31 层深的假层级</strong>（而点号层级最多 9 级，13 层就该封顶）。</p>
+<p><strong>正解</strong>：取「层级 <strong>≤</strong> dl 的<strong>最深</strong>祖先」。</p>
+<pre><code class="language-python">key = max((k for k in stack if k &lt;= dl), default=None)
+parent = stack[key] if key is not None else None
+n[&quot;parent&quot;] = parent[&quot;code&quot;] if parent else cur_subclass
+stack = {k: v for k, v in stack.items() if k &lt; dl + 1}
+stack[dl + 1] = n
+</code></pre>
+<p><strong>怎么验证修对了</strong>：加一条断言——</p>
+<pre><code>最大祖先链深度 = 12（= 部/大类/小类/大组 + 8 级小组）
+</code></pre>
+<p>这个数字是<strong>可以事先算出来的</strong>，所以它是硬判据，不是"看着还行"。</p>
+<hr />
+<h3 id="p2-2-5-section">坑 2-5　部（section）节点不能靠正文建</h3>
+<p><strong>现象</strong>：整棵树的根节点只有 3 个（应该 8 个）。</p>
+<p><strong>根因</strong>：我以为正文里会有「A部——人类生活必需」这一行。实测<strong>只有 D / G / H 三部有，A/B/C/E/F 压根没有</strong>。
+靠正文建根节点 → 直接丢掉 5 个部。</p>
+<p><strong>修复</strong>：内置 8 个部的标准名称做兜底，正文里若有则优先：</p>
+<pre><code class="language-python">SECTION_TITLES = {
+    &quot;A&quot;: &quot;人类生活必需&quot;, &quot;B&quot;: &quot;作业；运输&quot;, &quot;C&quot;: &quot;化学；冶金&quot;, &quot;D&quot;: &quot;纺织；造纸&quot;,
+    &quot;E&quot;: &quot;固定建筑物&quot;, &quot;F&quot;: &quot;机械工程；照明；加热；武器；爆破&quot;, &quot;G&quot;: &quot;物理&quot;, &quot;H&quot;: &quot;电学&quot;,
+}
+</code></pre>
+<hr />
+<h3 id="p2-2-6">坑 2-6　附注区 / 小类索引区里全是"分类号"，但都不是条目</h3>
+<p>分类表里夹着<strong>两大块非分类条目的内容</strong>，它们长得很像条目，非常会骗人：</p>
+<h4 id="p2-a">(a) 小类索引 —— 意外的官方礼物 🎁</h4>
+<p>原文形如：</p>
+<pre><code>幅度；角度；组合；超再生    1/00；3/00；5/00；9/00；11/00
+</code></pre>
+<p>这是国知局<strong>白送的「中文关键词 → 分类号」对照表</strong>，全库抽出 <strong>3,161 条</strong>，
+官方、中文、零成本，可直接用于后续的查询扩展。<strong>单独剥离成 <code>ipc_index_terms.jsonl</code>。</strong></p>
+<h4 id="p2-b">(b) 跨类目对照索引 —— 伪装成小类的假条目</h4>
+<p>原文形如：</p>
+<pre><code>B08B 1/20移动物品的清洁            ← 小类号后面跟的是【组号】
+B01D B03B，B03C，B03D B04B，B07B   ← 小类号后面跟的是【另一个分类号】
+</code></pre>
+<p>这会让 <strong>B 部凭空多出一批小类</strong>（<code>B01D</code> / <code>B08B</code> / <code>B21B</code> / <code>B21C</code> …）并抢走真小类的 code。</p>
+<p><strong>判据</strong>：</p>
+<pre><code class="language-python">def looks_like_index_entry(s) -&gt; bool:
+    &quot;&quot;&quot;真条目：分类号后跟【中文标题】；索引条目：分类号后跟【组号或另一分类号】&quot;&quot;&quot;
+    return bool(re.match(r&quot;^[A-H]\d{2}[A-Z]?\s+(?:\d{1,4}/\d{2,6}|[A-H]\d{2})&quot;, s))
+</code></pre>
+<h4 id="p2-c-4">(c) 附注的 4 种写法</h4>
+<pre><code>附注          附注[7]          附注：          附注〔2014.01〕
+</code></pre>
+<p>只认 <code>附注[7]</code> 会让后面 3 种没被识别 → 附注正文被当标题吞掉。</p>
+<pre><code class="language-python">RE_NOTES = re.compile(r&quot;^附注(?:[〔\[（(][^〕\]）)]*[〕\]）)])?\s*[：:]?\s*$&quot;)
+</code></pre>
+<h4 id="p2-d">(d) 附注正文里的分类号引用：<strong>全角空格</strong>是关键判据</h4>
+<pre><code class="language-python">&quot;H02P6/26　优先于H02P6/04-H02P6/24&quot;     # ← 分类号后是【全角空格】U+3000
+</code></pre>
+<p><strong>真条目一律用半角空格。</strong> 这一条判据极为有效：</p>
+<pre><code class="language-python">RE_FULLWIDTH_GAP = re.compile(r&quot;^[A-H]\d{2}[A-Z]\d{1,4}/\d{2,6}\u3000&quot;)
+</code></pre>
+<h4 id="p2-e">(e) 区域状态机 + "重复出现即引用"</h4>
+<ul>
+<li>进入 <code>备注</code> / <code>小类索引</code> 区后，<strong>只有大类行、小类行、带点号层级或同行带标题的条目行</strong>才真正结束该区；
+  其余一律按区域归集。</li>
+<li><strong>同一分类号在分类表里只会定义一次</strong>，再次出现必然是附注对它的引用
+  （如 <code>H02S20/00 同样为使用太阳能集热器而设计的支撑结构也被分类在…</code>）。
+  用一个 <code>defined</code> 集合即可识别并丢弃。</li>
+</ul>
+<pre><code class="language-python">if code in defined:            # 已定义过 → 这次是引用，不是条目
+    return &quot;other&quot;, None, False
+</code></pre>
+<h4 id="p2-f">(f) 两道归属校验（缺一不可）</h4>
+<pre><code class="language-python"># ① 部字母必须与本 PDF 一致  —— 跨部分类号只可能出现在正文引用里
+#    实测挡掉：B 部假 C14B、E 部假 A47B、D 部假 A47B77/10
+m.group(1)[0] == dept
+
+# ② 必须属于当前所处的小类 —— IPC 里一个小类下所有大组/小组都以该小类号开头
+#    前缀不符的只可能是别处正文引用被折行后独占了一行
+m.group(1)[:4] == cur_subclass
+</code></pre>
+<hr />
+<h3 id="p2-2-7">坑 2-7　标题里混进"没有标记的说明文字"</h3>
+<p><strong>现象</strong>：抽样发现 <code>F41A</code>（轻武器；火炮）的小类标题里混进了 <code>1．对于轻武器和火炮而言…</code> 这样的说明。</p>
+<p><strong>根因</strong>：标题后面常直接跟一段<strong>没有「附注」标记</strong>的说明（<code>1．…</code> 或 <code>注意：…</code>）。它被当成标题的续行拼了进去。</p>
+<p><strong>修复</strong>：在 <code>commit()</code> 落盘标题时，找到"说明起始行"并把其后内容<strong>切到 <code>notes</code></strong>：</p>
+<pre><code class="language-python">RE_NOTE_HEAD = re.compile(r&quot;^(?:\d+\s*[．.]\s*\S|注[意释][：:])&quot;)
+
+cut = next((i for i, ln in enumerate(buf) if RE_NOTE_HEAD.match(ln)), None)
+if cut is not None:
+    note_buf = buf[cut:] + note_buf      # 说明进 notes
+    buf = buf[:cut]                       # title 只留标题
+</code></pre>
+<p><strong>验证</strong>：标题超长（&gt;180 字）节点数 <strong>130 → 0</strong>。</p>
+<hr />
+<h3 id="p2-8-pdf">已知数据缺口：8 个节点标题在源 PDF 里就是空的</h3>
+<p><code>C10L1/2387</code>、<code>C12N9/04</code>、<code>C12N9/48</code>、<code>C12N9/78</code>、<code>C12P19/44</code>、<code>C12P19/64</code>、<code>H02K21/24</code>、<code>H04L9/06</code></p>
+<p><strong>怎么确认真的是源缺失、而不是我抽取丢了</strong>：</p>
+<ol>
+<li>换 <code>pypdf</code> 的 <strong><code>extraction_mode="layout"</code></strong>（按坐标排版抽取，与默认模式算法完全不同）复核 → 该行依然是空；</li>
+<li>做<strong>语义反证</strong>：<code>C12N9/04</code> 按 IPC 应为"作用于 CH-OH 基团的氧化还原酶"，但<strong>全文搜 <code>CH-OH</code> 零命中</strong>。</li>
+</ol>
+<p>→ 两条独立证据都指向"源文件缺内容"。所以自检里把它标成 <strong><code>warn</code>（警告）而不是 <code>error</code>（失败）</strong>。</p>
+<blockquote>
+<p><strong>设计要点：自检要区分 <code>error</code> 和 <code>warn</code>。</strong>
+"源数据本身的问题"不该让流水线红掉，但必须<strong>被看见</strong>。用一张 <code>severity</code> 字段区分，退出码只由 <code>error</code> 决定。</p>
+</blockquote>
+<hr />
+<h2 id="p2-3">3. 数字演进表：每一次修复都有量化证据（★ 教学核心）</h2>
+<p><strong>重复分类号</strong>的数量变化，和每一步的根因一一对应。
+这张表的价值在于：它证明了"修复不是靠感觉，而是靠<strong>计数断言</strong>"。</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>重复数</th>
+<th>本轮修复的根因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>101</td>
+<td>起点（B 部跨类目对照索引被误判成小类）</td>
+</tr>
+<tr>
+<td>82</td>
+<td>加 <code>looks_like_index_entry()</code> 过滤索引条目</td>
+</tr>
+<tr>
+<td>77</td>
+<td>加"必须属于当前小类"校验</td>
+</tr>
+<tr>
+<td>71</td>
+<td>断句标点补上 <code>；</code>（小类索引区折行）</td>
+</tr>
+<tr>
+<td>5</td>
+<td>加"分类号被从中间切开"的合并分支</td>
+</tr>
+<tr>
+<td>3</td>
+<td>加"全角空格"判据 + "重复出现即引用"判据</td>
+</tr>
+<tr>
+<td><strong>0</strong></td>
+<td>✅ 全绿</td>
+</tr>
+</tbody>
+</table></div>
+<p>配套的其它指标：</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>指标</th>
+<th>修复前</th>
+<th>修复后</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>部（根节点）</td>
+<td>3</td>
+<td><strong>8</strong></td>
+</tr>
+<tr>
+<td>重复分类号</td>
+<td>101</td>
+<td><strong>0</strong></td>
+</tr>
+<tr>
+<td>孤儿节点 / 层级链断裂</td>
+<td>有</td>
+<td><strong>0 / 0</strong></td>
+</tr>
+<tr>
+<td>最大祖先链深度</td>
+<td>31（假层级）</td>
+<td><strong>12</strong>（理论值）</td>
+</tr>
+<tr>
+<td>标题超长（&gt;180 字）</td>
+<td>130</td>
+<td><strong>0</strong></td>
+</tr>
+<tr>
+<td>页眉混入标题</td>
+<td>—</td>
+<td><strong>0</strong></td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="p2-4">4. 可迁移的六条方法论</h2>
+<h3 id="p2-1_1">① 先侦察，再写代码</h3>
+<p>拿到非规整数据，第一步永远是<strong>做最小探测</strong>：有没有文本层？有几种排版形态？各占多少？
+探测脚本写起来只要 5 分钟，但能避免"写了两小时正则发现方向错了"。</p>
+<h3 id="p2-2_1">② 局部样本能验证"可行性"，不能定"形态分布"</h3>
+<p>我只测 H 部就得出"大类 49 个"的结论，实际是 132 个——因为<strong>我的正则假设先入为主了</strong>。
+→ 形态统计必须全量跑，局部样本只用来验证"这条路走不走得通"。</p>
+<h3 id="p2-3_1">③ 用计数断言替代肉眼判断</h3>
+<p>整个过程中所有关键判断都来自可复现的数字，而不是"看起来对"：</p>
+<ul>
+<li>条目数 / 层级分布 / 重复数 / 孤儿数 / 最大深度</li>
+<li><strong>理论值可算的指标最有价值</strong>（如"最大祖先链深度 = 12"），因为它是硬判据</li>
+</ul>
+<h3 id="p2-4_1">④ 每次修改后立刻重新量化（防过度修复）</h3>
+<p>A 部 13864 行 → 1374 行，就是靠"每部都打印 原始行数→逻辑行数"发现的。
+<strong>如果你不打印这个数字，这个 bug 会一路带到线上。</strong></p>
+<h3 id="p2-5">⑤ 交叉验证来定位"责任边界"</h3>
+<p>当出现异常时，先回答"<strong>是源数据的问题，还是我的问题</strong>"：</p>
+<ul>
+<li>换一种抽取算法（<code>layout</code> 模式）复核</li>
+<li>做语义反证（该有的关键词全文搜零命中）</li>
+</ul>
+<p>定位清楚才能决定：是要修代码，还是要标 <code>warn</code> 放行，还是要补数据源。</p>
+<h3 id="p2-6">⑥ 幂等 + 可追溯</h3>
+<ul>
+<li>下载脚本：链接实时解析（不硬编码）、已存在则跳过、<code>--force</code> 重下</li>
+<li>每份原始文件记录 <strong>md5 + 页数 + 来源 URL</strong></li>
+<li>产物带 <code>ipc_meta.json</code>：版本号、生成时间、统计、自检结果</li>
+</ul>
+<hr />
+<h2 id="p2-5_1">5. 自检清单（重跑时看这张表）</h2>
+<pre><code>✓ 孤儿节点（父级不存在）        0
+✓ 层级链断裂条目                0
+✓ 点号层级越界（&gt;9）            0
+✓ 最大祖先链深度                12   ← 理论上限
+✓ 页眉混入标题                  0
+✓ 重复分类号                    0
+✓ 无子节点的小类                0
+⚠ 空标题节点                    8    ← 源 PDF 该行本身为空，非解析缺陷
+</code></pre>
+<p>退出码只由 <code>error</code> 级检查决定，<code>warn</code> 不影响。</p>
+<hr />
+<h2 id="p2-6_1">6. 附：一个业务层面的发现</h2>
+<p>清洗完顺手验证过一件事，它直接影响<strong>下一步的映射方案选型</strong>：</p>
+<p><strong>H 部全文搜「物联网」→ 0 次命中。</strong></p>
+<p>但正确答案确实躺在里面：</p>
+<pre><code>H04L67/12 .. 适用于专有或专用联网环境，如医疗网络、传感器网络、汽车网络或远程计量网络
+H04W4/00    专门适用于无线通信网络的业务；设施
+</code></pre>
+<p>IPC 中文标题用的是「<strong>传感器网络</strong>」「<strong>远程计量网络</strong>」这类法律化抽象措辞，
+和用户嘴里的「物联网设备」<strong>字面重叠为零</strong>。</p>
+<p>→ 结论：<strong>纯关键词检索（0 命中）和"训一个 7.8 万类分类器"（无标注数据）都不可行</strong>。
+必须走「LLM 做概念桥接 + 检索召回 + 小 BERT 做 cross-encoder 重排」的组合，
+且产品形态应该是<strong>候选列表 + 层级路径 + 判定理由</strong>，而不是唯一答案。</p>
+<blockquote>
+<p>📌 这条不是"数据问题"，但它是数据探索的产物 ——
+<strong>清洗完之后顺手做一次目标场景的语料探测，往往能提前否掉错误的技术路线。</strong></p>
+</blockquote></section>
+</main>
+<footer>
+  <p>生成自 <code>ipc/docs/数据下载清洗SOP.md</code> 与 <code>ipc/docs/踩坑与解决方案.md</code>；
+  重跑 <code>.venv/bin/python scripts/20_build_docs.py</code> 即可更新本页。</p>
+</footer>
+</div>
+</body>
+</html>

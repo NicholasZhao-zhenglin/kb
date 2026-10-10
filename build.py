@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-个人知识库生成器 —— 把《IPC 数据下载与清洗手册》拆成分类条目，产出 0 依赖单文件知识库。
+个人知识库生成器 —— 扫描 articles/ 全量重建，产出 0 依赖单文件知识库。
 
 用法：
-    python3 build.py                 # 用默认源文件重新生成 index.html
-    python3 build.py --src X.html --out Y.html
+    python3 build.py                      # 全量重建 index.html
+    python3 build.py --out /tmp/x.html    # 只改输出路径
+
+数据来源（加一篇文章 = 建一个目录，不用改任何代码）：
+    categories.json                分类体系
+    articles/<id>/meta.json        条目元信息：order / id / cat / title / kicker / summary / tags
+    articles/<id>/source.html      正文，需含 <main>…</main>
 
 设计要点：
+  * 全量重建而非增量追加：幂等，不会出现「脚本 A 的产出被脚本 B 覆盖」
   * 输出为单个自包含 HTML（CSS/JS/数据全内联），file:// 直接打开，无网络、无 CDN
-  * 源文档按 <h2> 切分为独立条目；每条锚点加 <条目id>-- 前缀，避免多文档合并 id 冲突
-  * 条目内 h3→h2、h4→h3 降一级（条目标题由阅读器渲染，正文里不该再有一级标题）
+  * 每篇锚点加 <条目id>-- 前缀，避免多篇合并时 id 冲突
+  * 正文标题整体降一级（条目标题由阅读器渲染成 h1，正文里不该再有一级标题）
   * 内容逐字保留，不做改写
 """
 from __future__ import annotations
@@ -20,41 +26,69 @@ import html as htmllib
 import json
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_SRC = Path("/Users/yangqijun/patent_dev/ipc/docs/IPC数据下载与清洗手册.html")
 DEFAULT_OUT = HERE / "index.html"
+ARTICLES_DIR = HERE / "articles"
+CATS_FILE = HERE / "categories.json"
+
+# 站点元信息。subtitle 留空则自动取「分类名 · 分类名」。
+SITE = {
+    "title": "个人知识库",
+    "subtitle": "",
+    "source": "自建技术笔记：由原始项目文档整理而成",
+}
 
 
 # --------------------------------------------------------------------------
-# 1. 分类体系 + 条目登记表（源文档第 N 个 <h2> 片段 → 知识库条目）
+# 1. 数据来源：categories.json（分类）+ articles/<id>/{meta.json,source.html}
 # --------------------------------------------------------------------------
-CATS = [
-    {
-        "id": "data-eng",
-        "name": "数据工程",
-        "icon": "数",
-        "desc": "把非规整的官方文档（PDF / 年报 / 标准 / 分类表 / 法规）变成可用的结构化数据："
-                "下载、解析、清洗、自检、验收的完整方法与踩坑记录。",
-    },
-]
+# 加一篇 = 在 articles/ 下建一个目录，然后跑 python3 build.py：
+#     articles/<id>/meta.json     必填 order / id / cat / title / summary / tags，可选 kicker
+#     articles/<id>/source.html   正文，需含 <main>…</main>
+# build.py 每次全量重建，幂等；漏了哪篇一眼就能从输出里看出来。
+def load_categories() -> list[dict]:
+    if not CATS_FILE.exists():
+        sys.exit(f"× 找不到分类文件：{CATS_FILE}")
+    cats = json.loads(CATS_FILE.read_text(encoding="utf-8"))["cats"]
+    ids = [c["id"] for c in cats]
+    assert len(ids) == len(set(ids)), "× 分类 id 重复"
+    for c in cats:
+        for k in ("id", "name", "desc"):
+            assert c.get(k), f"× 分类 {c.get('id')!r} 缺字段 {k!r}"
+    return cats
 
-# 原文整篇作为一个条目放进知识库 —— 不拆分。
-# 需要再放别的知识时，往这里追加（并可用侧栏「导入 JSON」追加到浏览器本地）。
-ARTICLES = [
-    {
-        "id": "ipc-handbook",
-        "cat": "data-eng",
-        "title": "IPC 数据下载与清洗手册",
-        "kicker": "国知局《国际专利分类表》2026.01 · 8 部 PDF / 1,890 页 → 78,449 个结构化节点",
-        "summary": "从国知局 8 部 PDF 到 78,449 个结构化节点的完整记录：前半是通用 SOP"
-                   "（先决策、五个阶段、四层纯函数清洗、数字断言自检、抽样验收），"
-                   "后半是真实踩坑复盘（3 个下载坑、7 个解析坑、1 次把 bug 修得更大的事故）"
-                   "以及每一步的量化证据。",
-        "tags": ["IPC", "国知局", "PDF 解析", "数据清洗", "ETL", "SOP", "踩坑复盘", "结构化抽取", "专利"],
-    },
-]
+
+def load_articles() -> list[tuple[dict, Path]]:
+    """扫描 articles/，按 meta.order 排序，返回 [(meta, source_path)]。"""
+    if not ARTICLES_DIR.is_dir():
+        sys.exit(f"× 找不到文章目录：{ARTICLES_DIR}")
+    found = []
+    for d in sorted(ARTICLES_DIR.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        meta_p, src_p = d / "meta.json", d / "source.html"
+        if not meta_p.exists():
+            sys.exit(f"× {d.name} 里缺 meta.json")
+        if not src_p.exists():
+            sys.exit(f"× {d.name} 里缺 source.html")
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        if meta.get("id") != d.name:
+            sys.exit(f"× {d.name}/meta.json 的 id 是 {meta.get('id')!r}，必须与目录名一致")
+        for k in ("id", "cat", "title", "summary", "tags"):
+            if not meta.get(k):
+                sys.exit(f"× {d.name}/meta.json 缺字段 {k!r}（或为空）")
+        meta.setdefault("kicker", "")
+        meta.setdefault("order", 999)
+        found.append((meta, src_p))
+    if not found:
+        sys.exit("× articles/ 下没有任何文章目录")
+    ordered = sorted(found, key=lambda x: (x[0]["order"], x[0]["id"]))
+    orders = [m["order"] for m, _ in ordered]
+    assert len(orders) == len(set(orders)), f"× meta.json 的 order 有重复：{orders}"
+    return ordered
 
 
 
@@ -109,6 +143,16 @@ def prefix_anchors(body: str, art_id: str) -> str:
     return re.sub(r'href="#([^"]+)"', rf'href="#{art_id}--\1"', body)
 
 
+def wrap_tables(body: str) -> str:
+    """把每个 <table> 套进横滑容器 <div class="tw">。
+
+    源文档自己包过的那层先还原、再统一包一遍：往返回是恒等的（不会重叠包裹），
+    所以写文章的人不必记得手写这层 div —— 窄屏下表格也不会把页面撑破。
+    """
+    body = re.sub(r'<div class="tw">(\s*<table\b.*?</table>\s*)</div>', r"\1", body, flags=re.S)
+    return re.sub(r"(<table\b.*?</table>)", r'<div class="tw">\1</div>', body, flags=re.S)
+
+
 def outline_of(body: str) -> list[dict]:
     """抽取目录树：h2→1 级（部）、h3→2 级（章）、h4→3 级、h5→4 级。"""
     out = []
@@ -132,38 +176,49 @@ def word_count(text: str) -> int:
     return len(re.findall(r"[\u4e00-\u9fff]", text)) + len(re.findall(r"[A-Za-z0-9_]+", text))
 
 
-def build_data(src: Path) -> dict:
-    raw = src.read_text(encoding="utf-8")
-    m = re.search(r"<main>(.*?)</main>", raw, re.S)
-    if not m:
-        sys.exit("× 源文件里找不到 <main>")
-    main_html = m.group(1).strip()
-
-    # 原文自带的那套 <nav class="toc"> 不用：知识库的目录是从真实标题现生成的，
-    # 少一份需要同步维护的重复清单，也彻底避开多份文档合并时的锚点冲突。
-    n_h = {t: len(re.findall(rf"<{t}\b", main_html)) for t in ("h1", "h2", "h3", "h4")}
-    print(f"  源文档标题分布：{n_h}")
+def build_data() -> dict:
+    cats = load_categories()
+    cat_ids = {c["id"] for c in cats}
 
     arts = []
-    for spec in ARTICLES:
+    for spec, src_path in load_articles():
         art_id = spec["id"]
+        if spec["cat"] not in cat_ids:
+            sys.exit(f"× [{art_id}] 的 cat={spec['cat']!r} 没在 categories.json 里登记")
+
+        raw = src_path.read_text(encoding="utf-8")
+        m = re.search(r"<main>(.*?)</main>", raw, re.S)
+        if not m:
+            sys.exit(f"× {src_path} 里找不到 <main>")
+        main_html = m.group(1).strip()
+
+        # 源文档自带的那套 <nav class="toc"> 不用：知识库的目录是从真实标题现生成的，
+        # 少一份需要同步维护的重复清单，也彻底避开多篇合并时的锚点冲突。
+        n_h = {t: len(re.findall(rf"<{t}\b", main_html)) for t in ("h1", "h2", "h3", "h4")}
+
         body = shift_headings(main_html, 1)
         body = ensure_heading_ids(body, art_id)
         body = prefix_anchors(body, art_id)
+        body = wrap_tables(body)
+        ol = outline_of(body)
         plain = strip_tags(body)
+
+        # 每篇自己的断言：降级后目录层级必须与源标题分布一致，代码块一个都不能丢
+        expect = [n_h[t] for t in ("h1", "h2", "h3", "h4")]
+        got = [sum(1 for o in ol if o["lvl"] == k) for k in (1, 2, 3, 4)]
+        assert got == expect, f"× [{art_id}] 目录层级 {got} != 源标题分布 {expect}"
+        assert body.count("<pre>") == main_html.count("<pre>"), f"× [{art_id}] 代码块数量变了"
+        assert "<h1" not in body, f"× [{art_id}] 正文里出现了 h1（条目标题已经占了 h1）"
+
         arts.append({
             **spec,
             "html": body,
-            "outline": outline_of(body),
+            "outline": ol,
             "words": word_count(spec["title"] + spec["summary"] + " ".join(spec["tags"]) + plain),
             "read": max(1, round(word_count(plain) / 400)),
         })
-        ol = arts[-1]["outline"]
         print(f"    [{art_id}] {spec['title']} —— 正文 {word_count(plain)} 字，"
-              f"目录 {len(ol)} 项（1级 {sum(1 for o in ol if o['lvl'] == 1)}"
-              f" / 2级 {sum(1 for o in ol if o['lvl'] == 2)}"
-              f" / 3级 {sum(1 for o in ol if o['lvl'] == 3)}"
-              f" / 4级 {sum(1 for o in ol if o['lvl'] == 4)}）")
+              f"目录 {len(ol)} 项（1级 {got[0]} / 2级 {got[1]} / 3级 {got[2]} / 4级 {got[3]}）")
 
     ids = [a["id"] for a in arts]
     assert len(ids) == len(set(ids)), "条目 id 重复"
@@ -174,7 +229,7 @@ def build_data(src: Path) -> dict:
 
     stat = {
         "arts": len(arts),
-        "cats": len(CATS),
+        "cats": len(cats),
         "words": sum(a["words"] for a in arts),
         "tables": sum(a["html"].count("<table") for a in arts),
         "code": sum(a["html"].count("<pre>") for a in arts),
@@ -185,13 +240,13 @@ def build_data(src: Path) -> dict:
 
     return {
         "meta": {
-            "title": "个人知识库",
-            "subtitle": "数据工程 · 结构化抽取",
-            "built": "2026-09-21",
-            "source": "IPC 数据下载与清洗手册（国知局《国际专利分类表》2026.01，8 部 PDF → 78,449 个结构化节点）",
+            "title": SITE["title"],
+            "subtitle": SITE["subtitle"] or " · ".join(c["name"] for c in cats),
+            "built": date.today().isoformat(),
+            "source": SITE["source"],
             "stats": stat,
         },
-        "cats": CATS,
+        "cats": cats,
         "arts": arts,
     }
 
@@ -847,8 +902,8 @@ function viewHome(){
       return '<a href="#/t/'+encodeURIComponent(t.t)+'">'+esc(t.t)+'<b>'+t.n+'</b></a>'}).join('')+'</div>';
   h+='<div class="h2sec"><h2>关于这个知识库</h2></div>';
   h+='<div class="col2"><div class="note"><h3>来源</h3><p>'+esc(DATA.meta.source)
-    +'。原文<strong>整篇作为一个条目</strong>收录，内容逐字保留、未改写；只做了两件事：'
-    +'标题层级整体降一级（让条目标题独占 <code>h1</code>），锚点加条目前缀（为以后收录别的文档留位置）。</p>'
+    +'。每篇正文<strong>逐字保留、未改写</strong>；只做了两件事：'
+    +'标题层级整体降一级（让条目标题独占 <code>h1</code>），锚点加条目前缀（避免多篇合并时 id 冲突）。</p>'
     +'<h3>为什么是零依赖单文件</h3><ul>'
     +'<li>只用原生 HTML / CSS / JS，无 CDN、无构建、无框架</li>'
     +'<li>直接从 <code>file://</code> 打开即可，断网可用</li>'
@@ -857,8 +912,9 @@ function viewHome(){
     +'<div class="note"><h3>怎么扩展</h3><ul>'
     +'<li><b>导入</b>：侧栏「导入 JSON」，条目存进浏览器本地存储，与内置条目合并</li>'
     +'<li><b>导出</b>：侧栏「导出备份」，落一份 JSON，换设备再导入</li>'
-    +'<li><b>改内置</b>：编辑同目录 <code>build.py</code> 的 <code>ARTICLES</code> 列表后重跑，'
-    +'即可加入更多文档或分类</li>'
+    +'<li><b>加一篇</b>：在 <code>articles/</code> 下建一个目录，放 <code>meta.json</code>（元信息）'
+    +'和 <code>source.html</code>（含 <code>&lt;main&gt;</code> 的正文），再跑 <code>python3 build.py</code></li>'
+    +'<li><b>加分类</b>：编辑 <code>categories.json</code> 后重跑</li>'
     +'<li><b>快捷键</b>：<code>/</code> 或 <code>⌘K</code> 搜索，<code>↑↓</code> 选，<code>Enter</code> 打开，<code>Esc</code> 关闭</li></ul>'
     +'<h3>章节目录从哪来</h3><p>左栏「本页目录」由正文标题<strong>现生成</strong>，'
     +'所以不会和正文脱节；原文自带的那份 TOC 已弃用，少一处要同步维护的重复清单。滚动时目录会跟着高亮当前章节。</p>'
@@ -1175,13 +1231,11 @@ HTML_SHELL = r"""<!DOCTYPE html>
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", default=str(DEFAULT_SRC))
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     args = ap.parse_args()
 
-    src = Path(args.src)
-    print(f"读取源文档：{src}")
-    data = build_data(src)
+    print(f"扫描文章目录：{ARTICLES_DIR}")
+    data = build_data()
 
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     payload = payload.replace("</", "<\\/")          # 防止提前闭合 <script>
@@ -1207,15 +1261,17 @@ def main():
             assert o["id"] in body_ids, f"× [{a['id']}] 目录锚点 {o['id']} 在正文里不存在"
         lv = [sum(1 for o in a["outline"] if o["lvl"] == k) for k in (1, 2, 3, 4)]
         assert sum(lv) == len(a["outline"]), f"× [{a['id']}] 目录层级越界"
-    # 源文档的 h1/h2/h3/h4 = 2/17/28/6，整体降一级后应变成 2/17/28/6 的 1~4 级
+    # 层级统计：多篇合计，所以断言「目录项数 == 正文标题数」这个结构不变量，
+    # 而不是某一篇在某个时期的绝对值（每篇的精确校验已在 build_data 里逐条做过）。
     lvl_total = [sum(1 for a in data["arts"] for o in a["outline"] if o["lvl"] == k)
                  for k in (1, 2, 3, 4)]
-    assert lvl_total == [2, 17, 28, 6], (
-        f"× 标题层级不对：得到 {lvl_total}，应为 [2, 17, 28, 6]"
+    head_total = len(re.findall(r"<h[2-5]\b", content))
+    assert sum(lvl_total) == head_total, (
+        f"× 目录项数 {sum(lvl_total)} 与正文标题数 {head_total} 不符"
         " —— 多半是 shift_headings 的替换顺序写反了")
     assert content.count("<table") == content.count('<div class="tw"><table>'), "× 表格没套横滑容器"
     assert content.count("</table>") == content.count("</table></div>"), "× 表格容器没闭合"
-    assert content.count("<pre>") == 34, "× 代码块数量变了"
+    assert content.count("<pre>") == data["meta"]["stats"]["code"], "× 代码块统计对不上"
     # 单文件零依赖：不得出现任何外部资源引用
     for pat in (r'<link\b[^>]*\bhref="(?!#)', r'<script\b[^>]*\bsrc=', r'@import', r'https?://[^\s"\')]+\.(?:js|css|woff2?|png|jpg|svg)'):
         assert not re.search(pat, out, re.I), f"× 出现了外部依赖：{pat}"

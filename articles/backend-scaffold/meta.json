@@ -1,0 +1,9 @@
+{
+  "order": 2,
+  "id": "backend-scaffold",
+  "cat": "backend-eng",
+  "title": "FastAPI 后端脚手架拆解",
+  "kicker": "agentic_rag-1/backend · 10 个模块 / 4 部分 / 15 章 · 从 uvicorn 到 pgvector 的逐层解剖",
+  "summary": "把一个真实跑起来的 FastAPI 后端骨架拆开讲透：从「一次请求的完整旅程」入手，再逐层解剖配置、日志、异常体系、异步 ORM 会话、依赖注入、外部服务封装与健康探针，最后补上 Alembic 迁移、工程化缺口盘点和一份九步落地清单。文中四条踩坑记录（依赖名拼错却安装成功、缩进断裂导致属性消失、函数名差一个词、配置粘进 .py 忘了引号）都是这个项目上真实发生的，附运行时断言与复现命令。",
+  "tags": ["FastAPI", "SQLAlchemy 2.0", "异步", "依赖注入", "pydantic-settings", "Alembic", "PostgreSQL", "pgvector", "uv", "uvicorn", "架构分层", "踩坑复盘", "健康检查"]
+}
