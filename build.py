@@ -8,8 +8,10 @@
     python3 build.py --out /tmp/x.html    # 只改输出路径
 
 数据来源（加一篇文章 = 建一个目录，不用改任何代码）：
-    categories.json                分类体系
+    categories.json                分类体系（分类里带 "nav": true 的不进分类树，
+                                   改由侧栏对应入口承载 —— 目前只有「收藏」这么用）
     articles/<id>/meta.json        条目元信息：order / id / cat / title / kicker / summary / tags
+                                   外链资料再加 url（+ 可选 points），不放 source.html
     articles/<id>/source.html      正文，需含 <main>…</main>
 
 设计要点：
@@ -18,6 +20,8 @@
   * 每篇锚点加 <条目id>-- 前缀，避免多篇合并时 id 冲突
   * 正文标题整体降一级（条目标题由阅读器渲染成 h1，正文里不该再有一级标题）
   * 内容逐字保留，不做改写
+  * 侧栏「我的收藏」= 全库外链资料（跨分类聚合），点卡片直达原文；
+    与「星标」（标记库内条目）是两回事，别混
 """
 from __future__ import annotations
 
@@ -256,7 +260,7 @@ def build_data() -> dict:
     stat = {
         "arts": len(arts),
         "exts": sum(1 for a in arts if a.get("ext")),
-        "cats": len(cats),
+        "cats": sum(1 for c in cats if not c.get("nav")),
         "words": sum(a["words"] for a in arts),
         "tables": sum(a["html"].count("<table") for a in arts),
         "code": sum(a["html"].count("<pre>") for a in arts),
@@ -558,6 +562,9 @@ html[data-theme="dark"] .body pre .copy.done{color:#7fd6a2;border-color:#2f5c42}
 .h2sec h2{font-size:18px;margin:0;font-weight:660}
 .h2sec .c{font-size:12px;color:var(--muted);font-family:var(--mono)}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:14px}
+/* 「我的收藏」页：卡片少、要点长，列宽放大一档，免得一行只挤十来个字。
+   min(340px,100%) 是防止窄屏（<380px）时 340px 的列宽撑破容器。 */
+.cards.favs{grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))}
 .card{
   display:block;background:var(--card);border:1px solid var(--border);border-radius:var(--r);
   padding:16px 18px;text-decoration:none;color:var(--text);transition:border-color .15s,box-shadow .15s,transform .15s;
@@ -692,11 +699,18 @@ var extra=LS.get('extra',[]);
 var ARTS=DATA.arts.concat(extra.map(function(a){
   a.outline=a.outline||[];a.tags=a.tags||[];a.words=a.words||0;a.read=a.read||1;return a}));
 var CATS=DATA.cats.slice();
+/* 「收藏」不是内容分类，而是外部资料的收纳处 —— 它由侧栏「我的收藏」入口承载。
+   标记 nav:true 的分类不再作为分类重复出现在分类树 / 分类地图里（分类计数也不计）。
+   但 CATS 仍保留全量，供 catName() / catIcon() 查名。 */
+var SHOWCATS=CATS.filter(function(c){return !c.nav});
 extra.forEach(function(a){
   if(!CATS.some(function(c){return c.id===a.cat})) CATS.push({id:a.cat,name:a.cat,icon:'·',desc:'来自导入的知识条目。'});
 });
 var byId={}; ARTS.forEach(function(a){byId[a.id]=a});
 function artsOf(cid){return ARTS.filter(function(a){return a.cat===cid})}
+/* 「我的收藏」= 全库的外链资料（论文 / 规范 / 开源项目），跨分类聚合。
+   与「星标」是两件事：星标标记库内条目，收藏是外部资料本身。 */
+var EXTS=ARTS.filter(function(a){return a.ext});
 
 /* 外链条目（收藏的资料书签）：链接指向站外，新标签打开 */
 function linkOf(a){return a.ext?a.url:'#/a/'+a.id}
@@ -737,14 +751,14 @@ function toast(msg){
 function isFav(id){return S.favs.indexOf(id)>=0}
 function toggleFav(id){
   var i=S.favs.indexOf(id);
-  if(i>=0){S.favs.splice(i,1);toast('已取消收藏')}else{S.favs.unshift(id);toast('已收藏')}
+  if(i>=0){S.favs.splice(i,1);toast('已取消星标')}else{S.favs.unshift(id);toast('已加星标')}
   LS.set('favs',S.favs); renderSide(); syncFavBtn();
 }
 function syncFavBtn(){
   var b=$('.favbtn'); if(!b) return;
   b.classList.toggle('on', isFav(b.dataset.id));
   b.querySelector('.ic').textContent = isFav(b.dataset.id)?'★':'☆';
-  b.querySelector('.tx').textContent = isFav(b.dataset.id)?'已收藏':'收藏';
+  b.querySelector('.tx').textContent = isFav(b.dataset.id)?'已星标':'星标';
 }
 function pushHist(id){
   S.hist=S.hist.filter(function(x){return x!==id}); S.hist.unshift(id);
@@ -764,12 +778,12 @@ function renderSide(){
   var h='';
   h+='<nav class="snav">';
   h+='<a href="#/" data-nav="home">'+ic('home')+'首页<span class="n">'+ARTS.length+'</span></a>';
-  h+='<a href="#/fav" data-nav="fav">'+ic('star')+'我的收藏<span class="n">'+S.favs.length+'</span></a>';
+  h+='<a href="#/fav" data-nav="fav">'+ic('star')+'我的收藏<span class="n">'+EXTS.length+'</span></a>';
   h+='<a href="#/hist" data-nav="hist">'+ic('clock')+'最近阅读<span class="n">'+S.hist.length+'</span></a>';
   h+='<a href="#/tags" data-nav="tags">'+ic('tag')+'全部标签<span class="n">'+allTags().length+'</span></a>';
   h+='</nav>';
   h+='<details class="sgroup" open><summary>分类</summary>';
-  CATS.forEach(function(c){
+  SHOWCATS.forEach(function(c){
     var list=artsOf(c.id); if(!list.length) return;
     var col=S.collapsed.indexOf(c.id)>=0;
     h+='<div class="catblk'+(col?' collapsed':'')+'" data-cat="'+c.id+'">';
@@ -848,7 +862,7 @@ function chipRow(a){
   s+='<span class="chip stat">约 '+a.read+' 分钟</span>';
   s+='<a class="chip" href="#/c/'+a.cat+'">'+esc(catName(a.cat))+'</a>';
   a.tags.forEach(function(t){s+='<a class="chip" href="#/t/'+encodeURIComponent(t)+'">#'+esc(t)+'</a>'});
-  s+='<button class="favbtn" data-id="'+a.id+'"><span class="ic">☆</span><span class="tx">收藏</span></button>';
+  s+='<button class="favbtn" data-id="'+a.id+'" title="给这篇加个星标（只做记号，不等于「我的收藏」）"><span class="ic">☆</span><span class="tx">星标</span></button>';
   s+='</div>';
   return s;
 }
@@ -923,14 +937,14 @@ function viewHome(){
     +' —— 把踩过的坑、验证过的方法和可复用的清单放在一处，本地单文件，断网可读、可检索、可长期存档。</p></div>';
   h+='<div class="statrow">'
     +'<div class="stat bl"><b>'+ARTS.length+'</b><span>知识条目</span></div>'
-    +'<div class="stat"><b>'+CATS.length+'</b><span>分类</span></div>'
+    +'<div class="stat"><b>'+SHOWCATS.length+'</b><span>分类</span></div>'
     +'<div class="stat"><b>'+st.words.toLocaleString()+'</b><span>总字数</span></div>'
     +'<div class="stat"><b>'+st.tables+'</b><span>表格</span></div>'
     +'<div class="stat"><b>'+st.code+'</b><span>代码块</span></div>'
     +'<div class="stat"><b>'+st.anchors+'</b><span>章节锚点</span></div>'
     +'</div>';
-  h+='<div class="h2sec"><h2>分类地图</h2><span class="c">'+CATS.length+' 类</span></div>';
-  h+='<div class="cards">'+CATS.map(function(c){
+  h+='<div class="h2sec"><h2>分类地图</h2><span class="c">'+SHOWCATS.length+' 类</span></div>';
+  h+='<div class="cards">'+SHOWCATS.map(function(c){
       var l=artsOf(c.id), w=l.reduce(function(s,a){return s+a.words},0);
       var meta=l.length+' 篇'+(w?' · '+w.toLocaleString()+' 字':' · 外部链接');
       return '<a class="card" href="#/c/'+c.id+'"><div class="ct"><span class="badge">'+esc(c.icon)
@@ -946,7 +960,7 @@ function viewHome(){
   if(S.favs.length){
     var fv=S.favs.slice(0,4).map(function(id){return byId[id]}).filter(Boolean);
     if(fv.length){
-      h+='<div class="h2sec"><h2>我的收藏</h2><span class="c">共 '+S.favs.length+' 篇</span></div>';
+      h+='<div class="h2sec"><h2>星标条目</h2><span class="c">共 '+S.favs.length+' 篇</span></div>';
       h+='<div class="cards">'+fv.map(cardOf).join('')+'</div>';
     }
   }
@@ -969,13 +983,14 @@ function viewHome(){
     +'<li><b>导出</b>：侧栏「导出备份」，落一份 JSON，换设备再导入</li>'
     +'<li><b>加一篇</b>：在 <code>articles/</code> 下建一个目录，放 <code>meta.json</code>（元信息）'
     +'和 <code>source.html</code>（含 <code>&lt;main&gt;</code> 的正文），再跑 <code>python3 build.py</code></li>'
-    +'<li><b>收藏外链</b>：目录里只放 <code>meta.json</code> 并写 <code>url</code>，'
-    +'库里不留副本 —— 卡片展示标题、摘要与要点，点击直达原文</li>'
+    +'<li><b>收藏资料（外部链接）</b>：目录里只放 <code>meta.json</code> 并写 <code>url</code>，'
+    +'库里不留副本 —— 卡片展示标题、摘要与要点，点一下直达原文。'
+    +'这类资料只出现在侧栏<strong>「我的收藏」</strong>，不混进分类树</li>'
     +'<li><b>加分类</b>：编辑 <code>categories.json</code> 后重跑</li>'
     +'<li><b>快捷键</b>：<code>/</code> 或 <code>⌘K</code> 搜索，<code>↑↓</code> 选，<code>Enter</code> 打开，<code>Esc</code> 关闭</li></ul>'
     +'<h3>章节目录从哪来</h3><p>左栏「本页目录」由正文标题<strong>现生成</strong>，'
     +'所以不会和正文脱节；原文自带的那份 TOC 已弃用，少一处要同步维护的重复清单。滚动时目录会跟着高亮当前章节。</p>'
-    +'<h3>浏览记录存在哪</h3><p>收藏、历史、主题、字号都写在浏览器 <code>localStorage</code>，不上传、不联网。</p></div></div>';
+    +'<h3>浏览记录存在哪</h3><p>星标、历史、主题、字号都写在浏览器 <code>localStorage</code>，不上传、不联网。</p></div></div>';
   h+='</div>';
   S.cur=null; MAIN.innerHTML=h; renderSide(); markSide(); document.title='个人知识库';
 }
@@ -990,6 +1005,24 @@ function viewList(title,desc,list,emptyMsg){
   h+='</div>';
   S.cur=null; MAIN.innerHTML=h; renderSide(); markSide();
   document.title=title+' · 个人知识库';
+}
+
+/* 「我的收藏」：外部资料（论文 / 规范 / 开源项目）的卡片墙。
+   库内不留正文副本 —— 点卡片直接在新标签打开原文。 */
+function viewFavs(){
+  var h='<div class="page">'+crumbs([{t:'首页',href:'#/'},{t:'我的收藏'}]);
+  h+='<div class="hero"><h1>我的收藏</h1><p class="sub">收藏的外部资料：论文、规范、开源项目。'
+    +'库内只留卡片（标题、出处、要点），点一下直达原文 —— 不占本地体积，也不会因为原文更新而过时。</p></div>';
+  if(!EXTS.length){
+    h+='<div class="empty">还没有收藏的资料。在 <code>articles/</code> 下建一个目录，'
+      +'在里面放一份 <code>meta.json</code> 并写上 <code>url</code> 即可。</div>';
+  }else{
+    h+='<div class="h2sec"><h2>资料</h2><span class="c">共 '+EXTS.length+' 份</span></div>';
+    h+='<div class="cards favs">'+EXTS.map(cardOf).join('')+'</div>';
+  }
+  h+='</div>';
+  S.cur=null; MAIN.innerHTML=h; renderSide(); markSide();
+  document.title='我的收藏 · 个人知识库';
 }
 
 function viewTags(){
@@ -1157,8 +1190,7 @@ function route(){
   if(hash.indexOf('#/a/')===0){ viewArticle(decodeURIComponent(hash.slice(4))) }
   else if(hash.indexOf('#/c/')===0){ viewCat(decodeURIComponent(hash.slice(4))) }
   else if(hash.indexOf('#/t/')===0){ viewTag(decodeURIComponent(hash.slice(4))) }
-  else if(hash==='#/fav'){ viewList('我的收藏','标了星号的条目会出现在这里。',
-      S.favs.map(function(id){return byId[id]}).filter(Boolean),'还没有收藏。打开任意条目，点右上角「收藏」。') }
+  else if(hash==='#/fav'){ viewFavs() }
   else if(hash==='#/hist'){ viewList('最近阅读','按打开时间倒序，最多保留 24 条。',
       S.hist.map(function(id){return byId[id]}).filter(Boolean),'还没有阅读记录。') }
   else if(hash==='#/tags'){ viewTags() }
@@ -1348,7 +1380,8 @@ def main():
     assert m, "× 找不到内联数据块"
     reparsed = json.loads(m.group(1).replace("<\\/", "</"))
     assert len(reparsed["arts"]) == len(data["arts"]), "× 内联数据条目数对不上"
-    print(f"  断言通过：{len(ids)} 锚点 · 目录层级 {lvl_total} · {len(data['cats'])} 分类 · "
+    print(f"  断言通过：{len(ids)} 锚点 · 目录层级 {lvl_total} · "
+          f"{len(data['cats'])} 分类（展示 {data['meta']['stats']['cats']}）· "
           f"零外部依赖 · JSON 可解析")
 
     dest = Path(args.out)
@@ -1357,7 +1390,7 @@ def main():
 
     kb = len(out.encode("utf-8")) / 1024
     print(f"\n✓ 已生成 {dest}")
-    print(f"  {kb:.1f} KB · {len(data['arts'])} 条 · {len(data['cats'])} 类 · "
+    print(f"  {kb:.1f} KB · {len(data['arts'])} 条 · 展示 {data['meta']['stats']['cats']} 类 · "
           f"{data['meta']['stats']['anchors']} 锚点 · {data['meta']['stats']['tables']} 表格 · "
           f"{data['meta']['stats']['code']} 代码块")
 

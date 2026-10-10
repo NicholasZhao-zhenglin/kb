@@ -43,6 +43,10 @@ const calc = DATA ? {
   arts: DATA.arts.length,
   extArts: DATA.arts.filter((a) => a.ext),
   cats: DATA.cats.length,
+  // nav 分类（收藏）不出现在分类树 / 分类地图里，由侧栏「我的收藏」入口承载
+  showCats: DATA.cats.filter((c) => !c.nav).length,
+  // 侧栏分类树里能列出的条目（nav 分类下的不进树，改由「我的收藏」承载）
+  sideArts: DATA.arts.filter((a) => !(DATA.cats.find((c) => c.id === a.cat) || {}).nav),
   words: DATA.arts.reduce((s, a) => s + a.words, 0),
   tables: DATA.arts.reduce((s, a) => s + (a.html.match(/<table/g) || []).length, 0),
   code: DATA.arts.reduce((s, a) => s + (a.html.match(/<pre>/g) || []).length, 0),
@@ -112,9 +116,14 @@ if (DATA) {
   eq("启动无 JS 异常", errors.length, 0, errors.slice(0, 3).join(" | "));
 
   console.log("\n[3] 侧栏（首页态）");
-  eq("侧栏：分类块数 = 数据分类数", $$(".catblk").length, calc.cats);
-  eq("侧栏：条目链接数 = 数据条目数", $$("#side a[data-art]").length, calc.arts);
+  eq("侧栏：分类块数 = 展示分类数（不含 nav 分类）", $$(".catblk").length, calc.showCats);
+  ok("侧栏：分类树里没有「收藏」（改由「我的收藏」入口承载，避免重复）",
+    $$('#side .catblk[data-cat="bookmarks"]').length === 0);
+  eq("侧栏：条目链接数 = 分类树里的条目数（外链资料不进树）",
+    $$("#side a[data-art]").length, calc.sideArts.length);
   eq("侧栏：快捷入口 4 个", $$("#side a[data-nav]").length, 4);
+  eq("侧栏：「我的收藏」计数 = 收藏的资料数（与星标无关）",
+    $('#side a[data-nav="fav"] .n').textContent, String(calc.extArts.length));
   ok("侧栏：首页默认高亮", $('#side a[data-nav="home"]').classList.contains("on"));
   eq("侧栏：条目名正确", $('#side a[data-art]').textContent.trim(), "IPC 数据下载与清洗手册");
   eq("首页态不显示本页目录", $$("#dout").length, 0);
@@ -123,12 +132,14 @@ if (DATA) {
   const stats = $$(".statrow .stat b").map((b) => b.textContent.replace(/,/g, ""));
   eq("首页：统计卡 6 张", stats.length, 6);
   eq("首页：条目数 = 数据条目数", stats[0], String(calc.arts));
-  eq("首页：分类数 = 数据分类数", stats[1], String(calc.cats));
+  eq("首页：分类数 = 展示分类数", stats[1], String(calc.showCats));
   eq("首页：总字数与数据一致", stats[2], String(calc.words));
   eq("首页：表格数 = 现算表格数", stats[3], String(calc.tables));
   eq("首页：代码块数 = 现算代码块数", stats[4], String(calc.code));
   eq("首页：锚点数 = 现算锚点数", stats[5], String(calc.anchors));
-  eq("首页：卡片数 = 分类 + 条目", $$(".cards .card").length, calc.cats + calc.arts);
+  eq("首页：卡片数 = 分类 + 条目", $$(".cards .card").length, calc.showCats + calc.arts);
+  ok("首页：分类地图里没有「收藏」卡片（同上）",
+    $$('.cards .card[href="#/c/bookmarks"]').length === 0);
   ok("首页：标签云有内容", $$(".tagcloud a").length >= 9, `${$$(".tagcloud a").length} 个`);
   eq("首页文档标题", doc.title, "个人知识库");
 
@@ -218,25 +229,36 @@ if (DATA) {
   ok("快捷键 / ：聚焦搜索框", doc.activeElement === q);
   eq("快捷键 / ：搜索框被清空", q.value, "");
 
-  console.log("\n[11] 收藏");
+  console.log("\n[11] 星标（标记库内条目 —— 与「我的收藏」不是一回事）");
   const favBtn = $(".favbtn");
-  eq("收藏按钮初始态", favBtn.querySelector(".tx").textContent, "收藏");
+  eq("星标按钮初始态", favBtn.querySelector(".tx").textContent, "星标");
   favBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);
-  eq("收藏后文案", $(".favbtn .tx").textContent, "已收藏");
-  eq("收藏写入 localStorage", JSON.parse(window.localStorage.getItem("kb.favs")).join(","), "ipc-handbook");
-  eq("收藏后侧栏出现星标", $$('#side a[data-art="ipc-handbook"] .fav').length, 1);
+  eq("星标后文案", $(".favbtn .tx").textContent, "已星标");
+  eq("星标写入 localStorage", JSON.parse(window.localStorage.getItem("kb.favs")).join(","), "ipc-handbook");
+  eq("星标后侧栏出现星标", $$('#side a[data-art="ipc-handbook"] .fav').length, 1);
+  eq("星标不影响「我的收藏」的计数（那里统计的是文献，不是星标）",
+    $('#side a[data-nav="fav"] .n').textContent, String(calc.extArts.length));
   eq("收藏动作不会把目录弄丢（侧栏重建后仍在）", $$("#dout a").length, 53);
   $(".favbtn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);
-  eq("取消收藏后 localStorage 为空", window.localStorage.getItem("kb.favs"), "[]");
+  eq("取消星标后 localStorage 为空", window.localStorage.getItem("kb.favs"), "[]");
 
-  console.log("\n[12] 路由：首页 / 分类 / 标签 / 收藏 / 最近");
+  console.log("\n[12] 路由：首页 / 分类 / 标签 / 我的收藏 / 最近");
   await go("#/hist");
   eq("最近阅读：1 条记录", $$(".artlist a").length, 1);
   eq("历史最新一条", JSON.parse(window.localStorage.getItem("kb.hist"))[0], "ipc-handbook");
   await go("#/fav");
-  ok("收藏页：显示空态", $(".empty") !== null);
+  const favCards = $$(".cards .card");
+  eq("我的收藏页：卡片数 = 收藏的资料数", favCards.length, calc.extArts.length);
+  ok("我的收藏页：每张卡片都直接指向站外原文",
+    favCards.length > 0 && favCards.every((c) => calc.extArts.some((x) => x.url === c.getAttribute("href"))),
+    favCards.map((c) => c.getAttribute("href")).join(","));
+  ok("我的收藏页：卡片在新标签打开",
+    favCards.length > 0 && favCards.every((c) => c.getAttribute("target") === "_blank"));
+  eq("我的收藏页：标题就是「我的收藏」", $(".hero h1").textContent, "我的收藏");
+  eq("我的收藏页：侧栏高亮对应入口", $('#side a[data-nav="fav"]').classList.contains("on"), true);
+  eq("我的收藏页：不残留上一篇文章的目录", $$("#dout").length, 0);
   await go("#/c/data-eng");
   eq("分类页：1 篇", $$(".artlist a").length, 1);
   eq("分类页标题", $(".hero h1").textContent, "数据工程");
@@ -339,11 +361,9 @@ if (DATA) {
     ok("首页：外链卡片不显示字数/阅读时长",
       !!card && !/[\d,]+\s*字/.test(card.querySelector(".cf").textContent),
       card && card.querySelector(".cf").textContent);
-    // —— 侧栏
-    const side = $(`#side a[data-art="${ext.id}"]`);
-    eq("侧栏：外链条目 href 指向原文", side && side.getAttribute("href"), ext.url);
-    eq("侧栏：外链条目也新标签打开", side && side.getAttribute("target"), "_blank");
-    ok("侧栏：外链条目带 ↗ 标记", !!side && !!side.querySelector(".extico"));
+    // —— 侧栏：外链资料不进分类树，改由「我的收藏」入口承载（否则与分类重复）
+    ok("侧栏：外链资料不在分类树里（已由「我的收藏」入口承载）",
+      !$(`#side a[data-art="${ext.id}"]`));
     // —— 分类页
     await go("#/c/" + ext.cat);
     const catA = $(".artlist a");

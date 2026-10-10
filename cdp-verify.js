@@ -123,6 +123,12 @@ async function viewport(w, h, mobile = false, scale = 2) {
       cards: document.querySelectorAll('.cards .card').length,
       catBlks: document.querySelectorAll('.catblk').length,
       artLinks: document.querySelectorAll('#side a[data-art]').length,
+      // 页面脚本是闭包，DATA 不在全局 —— 直接解析内联数据块
+      dataArts: JSON.parse(document.getElementById('kb-data').textContent).arts.length,
+      extArts: JSON.parse(document.getElementById('kb-data').textContent)
+        .arts.filter(function(a){return a.ext}).length,
+      showCats: JSON.parse(document.getElementById('kb-data').textContent)
+        .cats.filter(function(c){return !c.nav}).length,
       bg: getComputedStyle(document.body).backgroundColor,
       fg: getComputedStyle(document.body).color,
     };
@@ -135,8 +141,12 @@ async function viewport(w, h, mobile = false, scale = 2) {
   near("主区宽度 = 视口 - 侧栏", base.mainW, 1440 - 280, 3);
   ok("body 高度锁在视口内（内部滚动，不整页滚）", Math.abs(base.bodyH - base.viewH) <= 1,
     `bodyH=${base.bodyH} viewH=${base.viewH}`);
-  ok("首页卡片数 = 侧栏分类数 + 条目数", base.cards === base.catBlks + base.artLinks,
-    `${base.cards} 张 = ${base.catBlks} 类 + ${base.artLinks} 条`);
+  ok("首页卡片数 = 展示分类数 + 全部条目数", base.cards === base.showCats + base.dataArts,
+    `${base.cards} 张 = ${base.showCats} 类 + ${base.dataArts} 条`);
+  ok("侧栏分类树不含「收藏」（改由「我的收藏」入口承载）",
+    base.catBlks === base.showCats, `侧栏 ${base.catBlks} 类 vs 展示分类 ${base.showCats} 类`);
+  ok("侧栏分类树里也不列外链资料（不在树里，去「我的收藏」看）",
+    base.artLinks === base.dataArts - base.extArts, `${base.artLinks} 条`);
   ok("浅色主题底色为亮色", /^rgb\(2[0-9]{2}/.test(base.bg), base.bg);
   await shot("01-home-desktop-light");
 
@@ -442,6 +452,34 @@ async function viewport(w, h, mobile = false, scale = 2) {
   ok("分类页无横向溢出", extCat.overflow <= 0, String(extCat.overflow));
   await shot("14-cat-bookmarks");
 
+  // 「我的收藏」= 文献收藏的卡片墙（星标条目不进这里，那是另一回事）
+  await evaluate(`location.hash='#/fav'; return 1`);
+  await sleep(700);
+  const favPage = await evaluate(`
+    var cards=[].slice.call(document.querySelectorAll('.cards .card'));
+    var nav=document.querySelector('#side a[data-nav="fav"]');
+    return { h: document.querySelector('.hero h1').textContent,
+             n: cards.length,
+             allExt: cards.length>0 && cards.every(function(c){return c.classList.contains('ext')}),
+             href: cards.length? cards[0].getAttribute('href'):null,
+             target: cards.length? cards[0].getAttribute('target'):null,
+             hasPts: cards.length? cards[0].querySelectorAll('.pts li').length:0,
+             navOn: nav?nav.classList.contains('on'):false,
+             navN: nav?nav.querySelector('.n').textContent:'',
+             overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  `);
+  eq("我的收藏页：标题为「我的收藏」", favPage.h, "我的收藏");
+  ok("我的收藏页：渲染的是文献卡片（不是星标条目列表）", favPage.allExt,
+    `${favPage.n} 张卡片`);
+  ok("我的收藏页：卡片直指论文原文",
+    favPage.href === "https://jakobengel.github.io/pdf/DSO.pdf", favPage.href);
+  eq("我的收藏页：卡片新标签打开", favPage.target, "_blank");
+  ok("我的收藏页：卡片带着要点", favPage.hasPts >= 4, `${favPage.hasPts} 条`);
+  eq("我的收藏页：侧栏入口高亮", favPage.navOn, true);
+  eq("我的收藏页：侧栏计数 = 资料数", favPage.navN, String(favPage.n));
+  ok("我的收藏页：无横向溢出", favPage.overflow <= 0, String(favPage.overflow));
+  await shot("14b-my-favorites");
+
   // 移动端：要点列表在窄屏不该撑破卡片
   await viewport(390, 844, true, 3);
   await evaluate(`location.hash='#/'; return 1`);
@@ -464,6 +502,20 @@ async function viewport(w, h, mobile = false, scale = 2) {
   ok("移动端：要点文本不溢出", extMob.over <= 1, `${extMob.over}px`);
   ok("移动端：页面无横向溢出", extMob.pageOverflow <= 0, String(extMob.pageOverflow));
   await shot("15-mobile-ext-card");
+
+  // 窄屏下的「我的收藏」：列宽不能撑破容器（minmax 的 min 用了 min(340px,100%) 兜底）
+  await evaluate(`location.hash='#/fav'; return 1`);
+  await sleep(700);
+  const favMob = await evaluate(`
+    var c=document.querySelector('.cards .card');
+    var r=c.getBoundingClientRect();
+    return { w: Math.round(r.width), vw: window.innerWidth,
+             overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  `);
+  ok("移动端：我的收藏卡片不撑破容器", favMob.w <= favMob.vw,
+    `${favMob.w}px / 视口 ${favMob.vw}px`);
+  ok("移动端：我的收藏无横向溢出", favMob.overflow <= 0, String(favMob.overflow));
+  await shot("15b-mobile-favorites");
   await viewport(1440, 1000, false, 2);
 
   console.log("\n[11] 页面运行期错误");
