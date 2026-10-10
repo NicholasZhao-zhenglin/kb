@@ -361,6 +361,13 @@ if (DATA) {
     ok("首页：外链卡片不显示字数/阅读时长",
       !!card && !/[\d,]+\s*字/.test(card.querySelector(".cf").textContent),
       card && card.querySelector(".cf").textContent);
+    // 上面只盯了第一份资料；这里逐份过一遍 —— 新加一张卡片时要点不能漏渲染
+    calc.extArts.forEach((ex) => {
+      const c = $(`.cards .card[href="${ex.url}"]`);
+      ok(`首页：「${ex.title.slice(0, 22)}…」卡片在列`, !!c);
+      eq("首页：该卡片要点数 = meta.points 数",
+        c ? c.querySelectorAll(".pts li").length : -1, ex.points.length);
+    });
     // —— 侧栏：外链资料不进分类树，改由「我的收藏」入口承载（否则与分类重复）
     ok("侧栏：外链资料不在分类树里（已由「我的收藏」入口承载）",
       !$(`#side a[data-art="${ext.id}"]`));

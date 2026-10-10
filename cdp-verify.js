@@ -26,6 +26,24 @@ const near = (name, got, want, tol = 2) =>
 const eq = (name, got, want) =>
   ok(name, got === want, `got=${JSON.stringify(got)} want=${JSON.stringify(want)}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 等 #main 的滚动真的停下来。
+// 页面 CSS 里有 scroll-behavior:smooth，所以 `scrollTop = 0` 是一次**动画**而不是瞬移；
+// Chromium 的动画时长随滚动距离增长，固定 sleep 会在长页面上提前收工 ——
+// 于是「量卡片坐标」发生在滚动途中，等鼠标真的落下去时卡片已经移走了，
+// 悬浮断言就这么假失败（实测症状：hovered=false atPoint=page）。
+// 判据改成「连续两次采样 scrollTop 相同」，与页面长度、内容多少都无关。
+async function settleScroll(minMs = 250, maxMs = 4000) {
+  const t0 = Date.now();
+  await sleep(minMs);
+  let prev = null, stable = 0;
+  while (Date.now() - t0 < maxMs) {
+    const cur = await evaluate(`return document.getElementById('main').scrollTop`);
+    if (cur === prev) { if (++stable >= 2) return cur; } else { stable = 0; }
+    prev = cur;
+    await sleep(80);
+  }
+  return prev;   // 超时也返回，不掩盖失败：后面的断言会照常判定
+}
 // 相对亮度：用来判断「主题切换后文字是否还读得清」，而不是死盯某个色值
 const lum = (c) => {
   const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(String(c));
@@ -340,7 +358,7 @@ async function viewport(w, h, mobile = false, scale = 2) {
   console.log("\n[9] 真实悬浮（:hover 由鼠标事件驱动，不是加 class）");
   await viewport(1440, 1000, false, 2);
   await evaluate(`location.hash='#/'; document.getElementById('main').scrollTop=0; return 1`);
-  await sleep(700);
+  await settleScroll();
   const hover = await evaluate(`
     var c=document.querySelector('.cards .card');
     var r=c.getBoundingClientRect();
