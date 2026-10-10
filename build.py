@@ -72,8 +72,6 @@ def load_articles() -> list[tuple[dict, Path]]:
         meta_p, src_p = d / "meta.json", d / "source.html"
         if not meta_p.exists():
             sys.exit(f"× {d.name} 里缺 meta.json")
-        if not src_p.exists():
-            sys.exit(f"× {d.name} 里缺 source.html")
         meta = json.loads(meta_p.read_text(encoding="utf-8"))
         if meta.get("id") != d.name:
             sys.exit(f"× {d.name}/meta.json 的 id 是 {meta.get('id')!r}，必须与目录名一致")
@@ -82,6 +80,23 @@ def load_articles() -> list[tuple[dict, Path]]:
                 sys.exit(f"× {d.name}/meta.json 缺字段 {k!r}（或为空）")
         meta.setdefault("kicker", "")
         meta.setdefault("order", 999)
+
+        # 外链条目（收藏的书签）：只放 meta.json，不放 source.html。
+        # 库内不留正文副本，卡片只展示元信息，点击直接跳原文。
+        url = (meta.get("url") or "").strip()
+        if url:
+            if not re.match(r"^https?://", url):
+                sys.exit(f"× {d.name}/meta.json 的 url 必须 http/https 开头：{url!r}")
+            meta["url"] = url
+            meta["ext"] = True
+            meta.setdefault("points", [])
+            if not isinstance(meta["points"], list):
+                sys.exit(f"× {d.name}/meta.json 的 points 必须是数组")
+            found.append((meta, None))
+            continue
+
+        if not src_p.exists():
+            sys.exit(f"× {d.name} 里缺 source.html（外链条目请在 meta.json 里写 url）")
         found.append((meta, src_p))
     if not found:
         sys.exit("× articles/ 下没有任何文章目录")
@@ -186,6 +201,13 @@ def build_data() -> dict:
         if spec["cat"] not in cat_ids:
             sys.exit(f"× [{art_id}] 的 cat={spec['cat']!r} 没在 categories.json 里登记")
 
+        # 外链条目：没有正文，也就不进字数/图表统计，只当一张跳转卡片
+        if src_path is None:
+            arts.append({**spec, "html": "", "outline": [], "words": 0, "read": 0})
+            print(f"    [{art_id}] {spec['title']} —— 外链卡片，"
+                  f"{len(spec['points'])} 条要点 → {spec['url']}")
+            continue
+
         raw = src_path.read_text(encoding="utf-8")
         m = re.search(r"<main>(.*?)</main>", raw, re.S)
         if not m:
@@ -222,6 +244,10 @@ def build_data() -> dict:
 
     ids = [a["id"] for a in arts]
     assert len(ids) == len(set(ids)), "条目 id 重复"
+    for a in arts:
+        if a.get("ext"):
+            assert not a["html"] and not a["outline"] and not a["words"], (
+                f"× [{a['id']}] 是外链条目，不该带正文/目录/字数")
     all_ids = re.findall(
         r'<(?:h[1-6]|section)\b[^>]*?\sid="([^"]+)"', "".join(a["html"] for a in arts)
     )
@@ -229,6 +255,7 @@ def build_data() -> dict:
 
     stat = {
         "arts": len(arts),
+        "exts": sum(1 for a in arts if a.get("ext")),
         "cats": len(cats),
         "words": sum(a["words"] for a in arts),
         "tables": sum(a["html"].count("<table") for a in arts),
@@ -541,6 +568,13 @@ html[data-theme="dark"] .body pre .copy.done{color:#7fd6a2;border-color:#2f5c42}
 .card .k{font-size:12px;color:var(--accent);margin-bottom:7px;font-weight:500}
 .card .cs{font-size:12.5px;color:var(--muted);line-height:1.65}
 .card .cf{margin-top:10px;font-size:11px;color:var(--muted);font-family:var(--mono)}
+/* 外链卡片（收藏的资料书签）：库内不留正文副本，点一下直接开原文 */
+.card.ext .ct{color:var(--accent)}
+.card .pts{margin:9px 0 0;padding:0;list-style:none}
+.card .pts li{position:relative;padding-left:13px;font-size:12.5px;line-height:1.62;color:var(--muted);margin-top:4px}
+.card .pts li::before{content:"·";position:absolute;left:3px;color:var(--accent);font-weight:700}
+.card .cf .go{color:var(--accent);font-weight:600}
+.extico{font-size:10px;color:var(--accent);flex:none}
 .artlist{display:flex;flex-direction:column;gap:2px}
 .artlist a{
   display:block;padding:12px 14px;border-radius:var(--r-sm);text-decoration:none;color:var(--text);
@@ -664,12 +698,22 @@ extra.forEach(function(a){
 var byId={}; ARTS.forEach(function(a){byId[a.id]=a});
 function artsOf(cid){return ARTS.filter(function(a){return a.cat===cid})}
 
+/* 外链条目（收藏的资料书签）：链接指向站外，新标签打开 */
+function linkOf(a){return a.ext?a.url:'#/a/'+a.id}
+function tgtAttr(a){return a.ext?' target="_blank" rel="noopener noreferrer"':''}
+function extMark(a){return a.ext?'<span class="extico" title="外部链接">↗</span>':''}
+// 键盘路径才需要 window.open（鼠标点击是 <a target="_blank"> 的原生行为）
+function openExt(url){ if(!url) return; try{ window.open(url,'_blank','noopener,noreferrer') }catch(e){} }
+
 /* 纯文本 & 搜索索引 */
 function plain(h){
   var d=document.createElement('div'); d.innerHTML=h;
   return (d.textContent||'').replace(/\s+/g,' ').trim();
 }
-ARTS.forEach(function(a){ a._plain=plain(a.html) });
+ARTS.forEach(function(a){
+  // 外链条目没有正文，让它也能被搜到：把摘要与要点并进检索文本
+  a._plain=plain(a.html)+(a.ext?(' '+a.summary+' '+(a.points||[]).join(' ')):'');
+});
 var INDEX=ARTS.map(function(a){
   return {a:a, t:(a.title+' '+(a.kicker||'')+' '+a.tags.join(' ')).toLowerCase(),
           g:a.tags.join(' ').toLowerCase(), x:a._plain.toLowerCase()};
@@ -735,9 +779,9 @@ function renderSide(){
     if(c.desc) h+='<div class="catdesc">'+esc(c.desc)+'</div>';
     h+='<div class="clist">';
     list.forEach(function(a){
-      h+='<a href="#/a/'+a.id+'" data-art="'+a.id+'">'
+      h+='<a href="'+esc(linkOf(a))+'"'+tgtAttr(a)+' data-art="'+a.id+'">'
         +(isFav(a.id)?'<span class="fav">★</span>':'')
-        +'<span>'+esc(a.title)+'</span></a>';
+        +'<span>'+esc(a.title)+'</span>'+extMark(a)+'</a>';
     });
     h+='</div></div>';
   });
@@ -810,6 +854,8 @@ function chipRow(a){
 }
 function viewArticle(id){
   var a=byId[id]; if(!a) return viewHome();
+  // 外链条目没有正文页：手输 hash / 旧书签进来时，把原文开出去再把当前页收回首页
+  if(a.ext){ openExt(a.url); if(location.hash!=='#/') location.hash='#/'; return }
   S.cur=id;
   var i=ARTS.indexOf(a);
   var prev=ARTS[i-1], next=ARTS[i+1];
@@ -844,21 +890,29 @@ function viewCat(cid){
   var h='<div class="page">';
   h+=crumbs([{t:'首页',href:'#/'},{t:c.name}]);
   h+='<div class="hero"><h1>'+esc(c.name)+'</h1><p class="sub">'+esc(c.desc||'')+'</p></div>';
-  h+='<div class="h2sec"><h2>条目</h2><span class="c">'+list.length+' 篇 · '
-    +list.reduce(function(s,a){return s+a.words},0)+' 字</span></div>';
+  var wsum=list.reduce(function(s,a){return s+a.words},0);
+  h+='<div class="h2sec"><h2>条目</h2><span class="c">'+list.length+' 篇'
+    +(wsum?' · '+wsum.toLocaleString()+' 字':' · 外部链接')+'</span></div>';
   h+='<div class="artlist">'+list.map(function(a){
-      return '<a href="#/a/'+a.id+'"><div class="at">'+(isFav(a.id)?'<span class="fav" style="color:#e0a52a">★</span>':'')
-        +esc(a.title)+'</div><div class="as">'+esc(a.summary)+'</div></a>'}).join('')+'</div>';
+      return '<a href="'+esc(linkOf(a))+'"'+tgtAttr(a)+'><div class="at">'
+        +(isFav(a.id)?'<span class="fav" style="color:#e0a52a">★</span>':'')
+        +esc(a.title)+extMark(a)+'</div><div class="as">'+esc(a.summary)+'</div></a>'}).join('')+'</div>';
   h+='</div>';
-  MAIN.innerHTML=h; markSide(); document.title=c.name+' · 个人知识库';
+  S.cur=null; MAIN.innerHTML=h; renderSide(); markSide();
+  document.title=c.name+' · 个人知识库';
 }
 
 function cardOf(a){
-  return '<a class="card" href="#/a/'+a.id+'">'
+  var pts=a.ext?(a.points||[]):[];
+  var foot=a.ext
+    ? '<span class="go">打开原文 ↗</span>'+(isFav(a.id)?' · ★':'')
+    : a.words+' 字 · '+a.read+' min'+(isFav(a.id)?' · ★':'');
+  return '<a class="card'+(a.ext?' ext':'')+'" href="'+esc(linkOf(a))+'"'+tgtAttr(a)+'>'
     +'<div class="ct"><span class="badge">'+esc(catIcon(a.cat))+'</span>'+esc(a.title)+'</div>'
     +'<div class="k">'+esc(a.kicker||'')+'</div>'
     +'<div class="cs">'+esc(a.summary)+'</div>'
-    +'<div class="cf">'+a.words+' 字 · '+a.read+' min'+(isFav(a.id)?' · ★':'')+'</div></a>';
+    +(pts.length?'<ul class="pts">'+pts.map(function(p){return '<li>'+esc(p)+'</li>'}).join('')+'</ul>':'')
+    +'<div class="cf">'+foot+'</div></a>';
 }
 function catIcon(id){var c=CATS.filter(function(x){return x.id===id})[0];return c?(c.icon||'·'):'·'}
 
@@ -878,9 +932,10 @@ function viewHome(){
   h+='<div class="h2sec"><h2>分类地图</h2><span class="c">'+CATS.length+' 类</span></div>';
   h+='<div class="cards">'+CATS.map(function(c){
       var l=artsOf(c.id), w=l.reduce(function(s,a){return s+a.words},0);
+      var meta=l.length+' 篇'+(w?' · '+w.toLocaleString()+' 字':' · 外部链接');
       return '<a class="card" href="#/c/'+c.id+'"><div class="ct"><span class="badge">'+esc(c.icon)
         +'</span>'+esc(c.name)+'</div><div class="cs">'+esc(c.desc||'')+'</div>'
-        +'<div class="cf">'+l.length+' 篇 · '+w.toLocaleString()+' 字</div></a>'}).join('')+'</div>';
+        +'<div class="cf">'+meta+'</div></a>'}).join('')+'</div>';
   if(S.hist.length){
     var rec=S.hist.slice(0,4).map(function(id){return byId[id]}).filter(Boolean);
     if(rec.length){
@@ -891,7 +946,7 @@ function viewHome(){
   if(S.favs.length){
     var fv=S.favs.slice(0,4).map(function(id){return byId[id]}).filter(Boolean);
     if(fv.length){
-      h+='<div class="h2sec"><h2>收藏</h2><span class="c">共 '+S.favs.length+' 篇</span></div>';
+      h+='<div class="h2sec"><h2>我的收藏</h2><span class="c">共 '+S.favs.length+' 篇</span></div>';
       h+='<div class="cards">'+fv.map(cardOf).join('')+'</div>';
     }
   }
@@ -914,13 +969,15 @@ function viewHome(){
     +'<li><b>导出</b>：侧栏「导出备份」，落一份 JSON，换设备再导入</li>'
     +'<li><b>加一篇</b>：在 <code>articles/</code> 下建一个目录，放 <code>meta.json</code>（元信息）'
     +'和 <code>source.html</code>（含 <code>&lt;main&gt;</code> 的正文），再跑 <code>python3 build.py</code></li>'
+    +'<li><b>收藏外链</b>：目录里只放 <code>meta.json</code> 并写 <code>url</code>，'
+    +'库里不留副本 —— 卡片展示标题、摘要与要点，点击直达原文</li>'
     +'<li><b>加分类</b>：编辑 <code>categories.json</code> 后重跑</li>'
     +'<li><b>快捷键</b>：<code>/</code> 或 <code>⌘K</code> 搜索，<code>↑↓</code> 选，<code>Enter</code> 打开，<code>Esc</code> 关闭</li></ul>'
     +'<h3>章节目录从哪来</h3><p>左栏「本页目录」由正文标题<strong>现生成</strong>，'
     +'所以不会和正文脱节；原文自带的那份 TOC 已弃用，少一处要同步维护的重复清单。滚动时目录会跟着高亮当前章节。</p>'
     +'<h3>浏览记录存在哪</h3><p>收藏、历史、主题、字号都写在浏览器 <code>localStorage</code>，不上传、不联网。</p></div></div>';
   h+='</div>';
-  MAIN.innerHTML=h; markSide(); document.title='个人知识库';
+  S.cur=null; MAIN.innerHTML=h; renderSide(); markSide(); document.title='个人知识库';
 }
 
 function viewList(title,desc,list,emptyMsg){
@@ -928,10 +985,11 @@ function viewList(title,desc,list,emptyMsg){
   h+='<div class="hero"><h1>'+esc(title)+'</h1><p class="sub">'+esc(desc)+'</p></div>';
   if(!list.length){h+='<div class="empty">'+esc(emptyMsg)+'</div>'}
   else{h+='<div class="artlist">'+list.map(function(a){
-    return '<a href="#/a/'+a.id+'"><div class="at">'+esc(a.title)+'</div>'
+    return '<a href="'+esc(linkOf(a))+'"'+tgtAttr(a)+'><div class="at">'+esc(a.title)+extMark(a)+'</div>'
       +'<div class="as">'+esc(a.summary)+'</div></a>'}).join('')+'</div>'}
   h+='</div>';
-  MAIN.innerHTML=h; markSide(); document.title=title+' · 个人知识库';
+  S.cur=null; MAIN.innerHTML=h; renderSide(); markSide();
+  document.title=title+' · 个人知识库';
 }
 
 function viewTags(){
@@ -940,7 +998,8 @@ function viewTags(){
   h+='<div class="hero"><h1>全部标签</h1><p class="sub">共 '+ts.length+' 个标签，点击筛选相关条目。</p></div>';
   h+='<div class="tagcloud">'+ts.map(function(t){
     return '<a href="#/t/'+encodeURIComponent(t.t)+'">'+esc(t.t)+'<b>'+t.n+'</b></a>'}).join('')+'</div></div>';
-  MAIN.innerHTML=h; markSide(); document.title='全部标签 · 个人知识库';
+  S.cur=null; MAIN.innerHTML=h; renderSide(); markSide();
+  document.title='全部标签 · 个人知识库';
 }
 
 function viewTag(tag){
@@ -977,10 +1036,10 @@ function renderPanel(q,res){
   h+= res.length?('找到 <b>'+res.length+'</b> 个条目 · <b>↑↓</b> 选择 · <b>Enter</b> 打开'):'没有匹配「'+esc(q)+'」的条目';
   h+='</div>';
   h+=res.map(function(r,i){
-    return '<a class="sitem'+(i===curIdx?' cur':'')+'" href="#/a/'+r.a.id+'" data-i="'+i+'">'
+    return '<a class="sitem'+(i===curIdx?' cur':'')+'" href="'+esc(linkOf(r.a))+'"'+tgtAttr(r.a)+' data-i="'+i+'">'
       +'<div class="st">'+hl(r.a.title,q)+'</div>'
       +'<div class="sp">'+hl(r.snippet,q)+'</div>'
-      +'<div class="sn">'+esc(catName(r.a.cat))+(r.a.tags.length?' · #'+esc(r.a.tags.join(' #')):'')+'</div></a>'}).join('');
+      +'<div class="sn">'+esc(catName(r.a.cat))+(r.a.ext?' · 外部链接':'')+(r.a.tags.length?' · #'+esc(r.a.tags.join(' #')):'')+'</div></a>'}).join('');
   h+='</div>'; panel.innerHTML=h; panel.classList.add('open');
 }
 function closeSearch(){panel.classList.remove('open');curIdx=-1;curList=[]}
@@ -1127,7 +1186,12 @@ qEl.addEventListener('keydown',function(e){
     var c=panel.querySelector('.sitem.cur');
     if(c&&c.scrollIntoView) c.scrollIntoView({block:'nearest'});
   }else if(e.key==='Enter'){
-    if(curList[curIdx]){ location.hash='#/a/'+curList[curIdx].a.id; qEl.value=''; closeSearch(); qEl.blur() }
+    var sel=curList[curIdx];
+    if(sel){
+      if(sel.a.ext){ window.open(sel.a.url,'_blank','noopener') }
+      else{ location.hash='#/a/'+sel.a.id }
+      qEl.value=''; closeSearch(); qEl.blur();
+    }
   }else if(e.key==='Escape'){ qEl.value=''; closeSearch(); qEl.blur() }
 });
 panel.addEventListener('click',function(e){
@@ -1178,12 +1242,13 @@ window.addEventListener('keydown',function(e){
     var links=$$('#side .clist a'); if(!links.length) return;
     var cur=-1; links.forEach(function(l,i){if(l.classList.contains('on'))cur=i});
     var nx=cur+(e.key==='j'?1:-1);
+    var pick=function(a){ if(!a) return; if(a.ext){ openExt(a.url) } else { location.hash='#/a/'+a.id } };
     if(nx<0||nx>=links.length){ // 跨分类时用全部条目顺序
       var all=ARTS; var ci=all.indexOf(byId[S.cur]); if(ci<0) return;
-      var t2=all[ci+(e.key==='j'?1:-1)]; if(t2) location.hash='#/a/'+t2.id;
+      pick(all[ci+(e.key==='j'?1:-1)]);
       return;
     }
-    location.hash=links[nx].getAttribute('href');
+    pick(byId[links[nx].dataset.art]);
   }
 });
 
@@ -1272,9 +1337,12 @@ def main():
     assert content.count("<table") == content.count('<div class="tw"><table>'), "× 表格没套横滑容器"
     assert content.count("</table>") == content.count("</table></div>"), "× 表格容器没闭合"
     assert content.count("<pre>") == data["meta"]["stats"]["code"], "× 代码块统计对不上"
-    # 单文件零依赖：不得出现任何外部资源引用
+    # 单文件零依赖：不得出现任何外部资源引用。
+    # 扫描范围要排除内联数据块 —— 收藏的外链 URL 本来就合法地存在那里。
+    out_nodata = re.sub(
+        r'<script id="kb-data" type="application/json">.*?</script>', "", out, flags=re.S)
     for pat in (r'<link\b[^>]*\bhref="(?!#)', r'<script\b[^>]*\bsrc=', r'@import', r'https?://[^\s"\')]+\.(?:js|css|woff2?|png|jpg|svg)'):
-        assert not re.search(pat, out, re.I), f"× 出现了外部依赖：{pat}"
+        assert not re.search(pat, out_nodata, re.I), f"× 出现了外部依赖：{pat}"
     # 数据块必须能作为 JSON 解析
     m = re.search(r'<script id="kb-data" type="application/json">(.*?)</script>', out, re.S)
     assert m, "× 找不到内联数据块"

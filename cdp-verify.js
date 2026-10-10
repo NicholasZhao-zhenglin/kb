@@ -26,6 +26,11 @@ const near = (name, got, want, tol = 2) =>
 const eq = (name, got, want) =>
   ok(name, got === want, `got=${JSON.stringify(got)} want=${JSON.stringify(want)}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 相对亮度：用来判断「主题切换后文字是否还读得清」，而不是死盯某个色值
+const lum = (c) => {
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(String(c));
+  return m ? +m[1] * 0.299 + +m[2] * 0.587 + +m[3] * 0.114 : -1;
+};
 
 let chrome, ws, msgId = 0;
 const pending = new Map();
@@ -353,7 +358,115 @@ async function viewport(w, h, mobile = false, scale = 2) {
     `${hover.before.transform} → ${after.transform}`);
   ok("悬浮卡片有阴影", after.shadow !== hover.before.shadow && after.shadow !== "none");
 
-  console.log("\n[10] 页面运行期错误");
+  console.log("\n[10] 外链卡片（收藏的资料书签）");
+  await viewport(1440, 1000);
+  // 侧栏「本页目录」只属于文章页：切走之后必须收掉
+  await evaluate(`location.hash='#/a/ipc-handbook'; return 1`);
+  await sleep(800);
+  const doutArt = await evaluate(`return document.querySelectorAll('#dout a').length`);
+  await evaluate(`location.hash='#/'; return 1`);
+  await sleep(800);
+  const doutHome = await evaluate(`return document.querySelectorAll('#dout').length`);
+  ok("文章页：侧栏有本页目录", doutArt > 40, `${doutArt} 项`);
+  eq("切回首页：目录被收掉（不张冠李戴）", doutHome, 0);
+  await evaluate(`location.hash='#/'; return 1`);
+  await sleep(700);
+  const ext = await evaluate(`
+    var cards=[].slice.call(document.querySelectorAll('.cards .card')).filter(function(c){
+      return c.classList.contains('ext') });
+    if(!cards.length) return {n:0};
+    var c=cards[0], pts=c.querySelectorAll('.pts li'), cf=c.querySelector('.cf');
+    var r=c.getBoundingClientRect();
+    return {
+      n: cards.length,
+      href: c.getAttribute('href'),
+      target: c.getAttribute('target'),
+      rel: c.getAttribute('rel'),
+      title: c.querySelector('.ct').textContent.trim(),
+      pts: pts.length,
+      pt1: pts.length? pts[0].textContent.trim().slice(0,26):'',
+      footer: cf.textContent.trim(),
+      w: Math.round(r.width), h: Math.round(r.height),
+      ctColor: getComputedStyle(c.querySelector('.ct')).color,
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    };
+  `);
+  ok("首页渲染了外链卡片", ext.n >= 1, `${ext.n} 张`);
+  ok("卡片 href 指向论文原文", ext.href === "https://jakobengel.github.io/pdf/DSO.pdf", ext.href);
+  eq("卡片 target=_blank", ext.target, "_blank");
+  ok("卡片 rel 含 noopener", /noopener/.test(ext.rel || ""), ext.rel);
+  ok("卡片标题是论文名", /Direct Sparse Odometry/.test(ext.title), ext.title);
+  ok("卡片渲染了要点列表", ext.pts >= 4, `${ext.pts} 条；首条「${ext.pt1}」`);
+  ok("卡片底部提示「打开原文」", /打开原文/.test(ext.footer), ext.footer);
+  ok("卡片高度正常（没被压扁）", ext.h >= 150, `${ext.h}px`);
+  ok("浅色主题下卡片标题是深色字", lum(ext.ctColor) < 140, `${ext.ctColor} lum=${Math.round(lum(ext.ctColor))}`);
+  ok("首页仍无横向溢出", ext.overflow <= 0, String(ext.overflow));
+  await evaluate(`
+    var c=document.querySelector('.cards .card.ext');
+    if(c&&c.scrollIntoView) c.scrollIntoView({block:'center'});
+    return 1`);
+  await sleep(400);
+  await shot("12-home-ext-card");
+
+  // 深色主题下要点列表的文字必须还读得清（--muted 在两种主题里是不同的值）
+  await evaluate(`document.getElementById('theme-btn').click(); return 1`);
+  await sleep(500);
+  const extDark = await evaluate(`
+    var c=document.querySelector('.cards .card.ext');
+    return { li: getComputedStyle(c.querySelector('.pts li')).color,
+             ct: getComputedStyle(c.querySelector('.ct')).color,
+             body: getComputedStyle(document.body).color };
+  `);
+  ok("深色主题：卡片要点文字足够亮", lum(extDark.li) > 110,
+    `${extDark.li} lum=${Math.round(lum(extDark.li))}`);
+  ok("深色主题：卡片标题足够亮", lum(extDark.ct) > 110,
+    `${extDark.ct} lum=${Math.round(lum(extDark.ct))}`);
+  await shot("13-home-ext-card-dark");
+  await evaluate(`document.getElementById('theme-btn').click(); return 1`);
+  await sleep(500);
+
+  // 收藏分类页
+  await evaluate(`location.hash='#/c/bookmarks'; return 1`);
+  await sleep(700);
+  const extCat = await evaluate(`
+    var a=document.querySelector('.artlist a');
+    return { h: document.querySelector('.hero h1').textContent,
+             href: a?a.getAttribute('href'):null,
+             target: a?a.getAttribute('target'):null,
+             ext: a?!!a.querySelector('.extico'):false,
+             overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  `);
+  eq("收藏分类页标题", extCat.h, "收藏");
+  ok("分类页外链项直指原文", extCat.href === "https://jakobengel.github.io/pdf/DSO.pdf", extCat.href);
+  ok("分类页外链项带 ↗ 标记", extCat.ext === true);
+  ok("分类页无横向溢出", extCat.overflow <= 0, String(extCat.overflow));
+  await shot("14-cat-bookmarks");
+
+  // 移动端：要点列表在窄屏不该撑破卡片
+  await viewport(390, 844, true, 3);
+  await evaluate(`location.hash='#/'; return 1`);
+  await sleep(700);
+  await evaluate(`
+    var c=document.querySelector('.cards .card.ext');
+    if(c&&c.scrollIntoView) c.scrollIntoView({block:'center'});
+    return 1`);
+  await sleep(500);
+  const extMob = await evaluate(`
+    var c=document.querySelector('.cards .card.ext');
+    var li=c.querySelector('.pts li');
+    return { w: Math.round(c.getBoundingClientRect().width),
+             h: Math.round(c.getBoundingClientRect().height),
+             over: Math.round(li.scrollWidth - li.clientWidth),
+             pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  `);
+  ok("移动端：外链卡片宽度适配", extMob.w > 200 && extMob.w <= 390, `${extMob.w}px`);
+  ok("移动端：外链卡片高度正常", extMob.h >= 150, `${extMob.h}px`);
+  ok("移动端：要点文本不溢出", extMob.over <= 1, `${extMob.over}px`);
+  ok("移动端：页面无横向溢出", extMob.pageOverflow <= 0, String(extMob.pageOverflow));
+  await shot("15-mobile-ext-card");
+  await viewport(1440, 1000, false, 2);
+
+  console.log("\n[11] 页面运行期错误");
   ok("全程无未捕获异常 / 控制台错误", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
 
   console.log("\n" + "=".repeat(62));

@@ -41,6 +41,7 @@ catch (e) { ok("内联数据块是合法 JSON", false, e.message); }
 // 内容会持续增长，所以断言「UI 忠实反映数据」，而不是硬编码某个时期的绝对值。
 const calc = DATA ? {
   arts: DATA.arts.length,
+  extArts: DATA.arts.filter((a) => a.ext),
   cats: DATA.cats.length,
   words: DATA.arts.reduce((s, a) => s + a.words, 0),
   tables: DATA.arts.reduce((s, a) => s + (a.html.match(/<table/g) || []).length, 0),
@@ -55,6 +56,10 @@ if (DATA) {
   ok("数据：每个条目的分类都已登记",
     DATA.arts.every((a) => DATA.cats.some((c) => c.id === a.cat)),
     DATA.arts.filter((a) => !DATA.cats.some((c) => c.id === a.cat)).map((a) => a.id).join(","));
+  ok("数据：外链条目带 http(s) url 且不含正文/目录/字数",
+    calc.extArts.every((a) => /^https?:\/\//.test(a.url) && !a.html
+      && !(a.outline || []).length && !a.words),
+    calc.extArts.map((a) => `${a.id}→${a.url}`).join(",") || "(无外链条目)");
   eq("数据：首篇表格 15（与原文一致）", (DATA.arts[0].html.match(/<table/g) || []).length, 15);
   eq("数据：首篇代码块 34（与原文一致）", (DATA.arts[0].html.match(/<pre>/g) || []).length, 34);
   ok("数据：全量统计与现算一致",
@@ -241,6 +246,14 @@ if (DATA) {
   eq("标签 IPC：1 篇", $$(".artlist a").length, 1);
   await go("#/t/不存在zzz");
   ok("不存在的标签：空态", $(".empty") !== null);
+  // 侧栏的「本页目录」只属于文章页：切到首页/分类页后必须收掉，
+  // 否则会出现「首页左边挂着上一篇文章目录」这种张冠李戴
+  await go("#/a/ipc-handbook");
+  eq("文章页：侧栏有本页目录", $$("#dout a").length, 53);
+  await go("#/");
+  eq("首页：侧栏不残留上一篇文章的目录", $$("#dout").length, 0);
+  await go("#/c/bookmarks");
+  eq("分类页：侧栏也不残留目录", $$("#dout").length, 0);
 
   console.log("\n[13] 主题 / 字号");
   const themeBtn = $("#theme-btn");
@@ -308,7 +321,53 @@ if (DATA) {
   doc.createElement = realCreate;
   eq("导入：点击不抛异常", importThrew, null);
 
-  console.log("\n[17] 最终一致性");
+  console.log("\n[17] 外链卡片（收藏的资料书签）");
+  const catNameOf = (cid) => (DATA.cats.find((c) => c.id === cid) || {}).name;
+  if (!calc.extArts.length) {
+    ok("存在外链条目可供校验", false, "数据里没有 ext 条目");
+  } else {
+    const ext = calc.extArts[0];
+    await go("#/");
+    // —— 首页卡片
+    const card = $(`.cards .card[href="${ext.url}"]`);
+    ok("首页：外链卡片存在且 href 指向原文", !!card);
+    eq("首页：外链卡片新标签打开", card && card.getAttribute("target"), "_blank");
+    ok("首页：外链卡片带 noopener", !!card && /noopener/.test(card.getAttribute("rel") || ""));
+    ok("首页：卡片显示标题", !!card && card.querySelector(".ct").textContent.includes(ext.title));
+    eq("首页：卡片列出全部要点", card ? card.querySelectorAll(".pts li").length : -1, ext.points.length);
+    ok("首页：卡片有「打开原文」提示", !!card && !!card.querySelector(".cf .go"));
+    ok("首页：外链卡片不显示字数/阅读时长",
+      !!card && !/[\d,]+\s*字/.test(card.querySelector(".cf").textContent),
+      card && card.querySelector(".cf").textContent);
+    // —— 侧栏
+    const side = $(`#side a[data-art="${ext.id}"]`);
+    eq("侧栏：外链条目 href 指向原文", side && side.getAttribute("href"), ext.url);
+    eq("侧栏：外链条目也新标签打开", side && side.getAttribute("target"), "_blank");
+    ok("侧栏：外链条目带 ↗ 标记", !!side && !!side.querySelector(".extico"));
+    // —— 分类页
+    await go("#/c/" + ext.cat);
+    const catA = $(".artlist a");
+    eq("分类页：外链项 href 指向原文", catA && catA.getAttribute("href"), ext.url);
+    eq("分类页：外链项新标签打开", catA && catA.getAttribute("target"), "_blank");
+    eq("分类页：标题为该分类名", $(".hero h1").textContent, catNameOf(ext.cat));
+    // —— 搜索：摘要/要点必须进索引，否则外链条目搜不到
+    const kw = "逆深度";
+    const hits = await search(kw);
+    ok(`搜索「${kw}」命中外链条目（摘要/要点已进索引）`,
+      hits.some((el) => el.getAttribute("href") === ext.url), `${hits.length} 条命中`);
+    // —— 路由兜底：手输 #/a/<外链id>，应把原文送出去而不是渲染空的正文页
+    let opened = null;
+    const realOpen = window.open;
+    window.open = (u) => { opened = u; return null; };
+    await go("#/a/" + ext.id);
+    window.open = realOpen;
+    eq("兜底：手输外链条目 hash 会把原文送出去", opened, ext.url);
+    eq("兜底：外链条目不渲染正文页", $$(".doc h1").length, 0);
+    eq("兜底：当前页被收回首页", window.location.hash, "#/");
+  }
+  await go("#/a/ipc-handbook");   // 给下一节恢复状态
+
+  console.log("\n[18] 最终一致性");
   eq("清理：仍无 JS 异常", errors.length, 0);
   if (errors.length) errors.forEach((e) => console.log("        异常详情: " + e));
   ok("清理：document.title 正确", doc.title.includes("· 个人知识库"), doc.title);
