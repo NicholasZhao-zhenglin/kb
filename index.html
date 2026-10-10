@@ -127,8 +127,9 @@ mark{background:var(--mark);color:inherit;border-radius:3px;padding:0 2px}
 .clist a:hover{background:var(--bg-soft);color:var(--text)}
 .clist a.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
 .clist a .fav{color:#e0a52a;font-size:11px;flex:none}
-.catdesc{padding:2px 10px 8px;font-size:11.5px;line-height:1.6;color:var(--muted);
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* 侧栏分类块里不放分类简介：那一栏只有 240px 宽，两三行字必然被截断，
+   还会和下面的条目列表挤在一起（实测会盖住条目标题）。简介留给
+   分类页 hero 和首页「分类地图」卡片 —— 那里版面放得下。 */
 #side .sfoot{
   margin-top:18px;padding:12px 10px 0;border-top:1px solid var(--border);
   display:flex;flex-wrap:wrap;gap:6px;
@@ -532,7 +533,6 @@ function renderSide(){
     h+='<button class="chead" data-toggle="'+c.id+'"><span class="arw">⌄</span>'
       +'<span class="badge">'+esc(c.icon||'·')+'</span><span>'+esc(c.name)+'</span>'
       +'<span class="cnt">'+list.length+'</span></button>';
-    if(c.desc) h+='<div class="catdesc">'+esc(c.desc)+'</div>';
     h+='<div class="clist">';
     list.forEach(function(a){
       h+='<a href="'+esc(linkOf(a))+'"'+tgtAttr(a)+' data-art="'+a.id+'">'

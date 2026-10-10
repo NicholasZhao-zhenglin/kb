@@ -119,6 +119,15 @@ if (DATA) {
   eq("侧栏：分类块数 = 展示分类数（不含 nav 分类）", $$(".catblk").length, calc.showCats);
   ok("侧栏：分类树里没有「收藏」（改由「我的收藏」入口承载，避免重复）",
     $$('#side .catblk[data-cat="bookmarks"]').length === 0);
+  // 分类块里只有「分类头 + 条目列表」两件东西。曾经在中间塞过分类简介，
+  // 240px 宽的侧栏放不下，两行截断还会盖住下面的条目标题。
+  const catBlks = $$("#side .catblk");
+  ok("侧栏：分类块里不放分类简介（只有分类头 + 条目）",
+    $$("#side .catblk .catdesc").length === 0 &&
+    catBlks.every((b) => b.children.length === 2
+      && b.children[0].classList.contains("chead")
+      && b.children[1].classList.contains("clist")),
+    `catdesc=${$$("#side .catblk .catdesc").length} 块=${catBlks.length}`);
   eq("侧栏：条目链接数 = 分类树里的条目数（外链资料不进树）",
     $$("#side a[data-art]").length, calc.sideArts.length);
   eq("侧栏：快捷入口 4 个", $$("#side a[data-nav]").length, 4);
