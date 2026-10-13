@@ -712,22 +712,13 @@ var LS={
   get:function(k,d){try{var v=localStorage.getItem('kb.'+k);return v==null?d:JSON.parse(v)}catch(e){return d}},
   set:function(k,v){try{localStorage.setItem('kb.'+k,JSON.stringify(v))}catch(e){}}
 };
-var extra=LS.get('extra',[]);
-var ARTS=DATA.arts.concat(extra.map(function(a){
-  a.outline=a.outline||[];a.tags=a.tags||[];a.words=a.words||0;a.read=a.read||1;return a}));
-var CATS=DATA.cats.slice();
-/* 「收藏」不是内容分类，而是外部资料的收纳处 —— 它由侧栏「我的收藏」入口承载。
-   标记 nav:true 的分类不再作为分类重复出现在分类树 / 分类地图里（分类计数也不计）。
-   但 CATS 仍保留全量，供 catName() / catIcon() 查名。 */
-var SHOWCATS=CATS.filter(function(c){return !c.nav});
-extra.forEach(function(a){
-  if(!CATS.some(function(c){return c.id===a.cat})) CATS.push({id:a.cat,name:a.cat,icon:'·',desc:'来自导入的知识条目。'});
-});
-var byId={}; ARTS.forEach(function(a){byId[a.id]=a});
+var noteState=readNotes();
+var extra=noteState.extra, edits=noteState.edits;
+var ARTS=[], CATS=[], SHOWCATS=[], byId=Object.create(null), EXTS=[], INDEX=[];
+refreshNotes();
 function artsOf(cid){return ARTS.filter(function(a){return a.cat===cid})}
 /* 「我的收藏」= 全库的外链资料（论文 / 规范 / 开源项目），跨分类聚合。
    与「星标」是两件事：星标标记库内条目，收藏是外部资料本身。 */
-var EXTS=ARTS.filter(function(a){return a.ext});
 
 /* 外链条目（收藏的资料书签）：链接指向站外，新标签打开 */
 function linkOf(a){return a.ext?a.url:'#/a/'+a.id}
@@ -741,15 +732,6 @@ function plain(h){
   var d=document.createElement('div'); d.innerHTML=h;
   return (d.textContent||'').replace(/\s+/g,' ').trim();
 }
-ARTS.forEach(function(a){
-  // 外链条目没有正文，让它也能被搜到：把摘要与关键词并进检索文本
-  a._plain=plain(a.html)+(a.ext?(' '+a.summary+' '+a.tags.join(' ')):'');
-});
-var INDEX=ARTS.map(function(a){
-  return {a:a, t:(a.title+' '+(a.kicker||'')+' '+a.tags.join(' ')).toLowerCase(),
-          g:a.tags.join(' ').toLowerCase(), x:a._plain.toLowerCase()};
-});
-
 /* ---------------- 状态 ---------------- */
 var S={
   favs:LS.get('favs',[]),
@@ -879,6 +861,8 @@ function chipRow(a){
   s+='<a class="chip" href="#/c/'+a.cat+'">'+esc(catName(a.cat))+'</a>';
   a.tags.forEach(function(t){s+='<a class="chip" href="#/t/'+encodeURIComponent(t)+'">#'+esc(t)+'</a>'});
   s+='<button class="favbtn" data-id="'+a.id+'" title="给这篇加个星标（只做记号，不等于「我的收藏」）"><span class="ic">☆</span><span class="tx">星标</span></button>';
+  s+='<button class="chip" data-act="edit-note">编辑笔记</button>';
+  if(edits[a.id]) s+='<span class="chip">本地修改</span><button class="chip" data-act="reset-note">恢复原文</button>';
   s+='</div>';
   return s;
 }
@@ -947,7 +931,7 @@ function cardOf(a){
 function catIcon(id){var c=CATS.filter(function(x){return x.id===id})[0];return c?(c.icon||'·'):'·'}
 
 function viewHome(){
-  var st=DATA.meta.stats;
+  var st=noteStats();
   var h='<div class="page">';
   h+='<div class="hero"><h1>'+esc(DATA.meta.title)+'</h1><p class="sub">'+esc(DATA.meta.subtitle)
     +' —— 把踩过的坑、验证过的方法和可复用的清单放在一处，本地单文件，断网可读、可检索、可长期存档。</p></div>';
@@ -995,6 +979,7 @@ function viewHome(){
     +'<li>内容内联在页面里，不靠 <code>fetch</code>（浏览器会拦本地请求）</li>'
     +'<li>整份知识库 = 一个文件，拷到 U 盘 / 手机 / 归档都不会散</li></ul></div>'
     +'<div class="note"><h3>怎么扩展</h3><ul>'
+    +'<li><b>编辑</b>：文章页点「编辑笔记」，修改标题、摘要、标签和正文，再点「保存到本机」。只保存在当前浏览器；换设备前请导出备份。</li>'
     +'<li><b>导入</b>：侧栏「导入 JSON」，条目存进浏览器本地存储，与内置条目合并</li>'
     +'<li><b>导出</b>：侧栏「导出备份」，落一份 JSON，换设备再导入</li>'
     +'<li><b>加一篇</b>：在 <code>articles/</code> 下建一个目录，放 <code>meta.json</code>（元信息）'
@@ -1155,41 +1140,25 @@ function bindProgress(){
 
 /* ---------------- 导入 / 导出 ---------------- */
 function doExport(){
-  var payload={type:'kb-extra',version:1,exported:new Date().toISOString(),
-    arts:extra, favs:S.favs, hist:S.hist};
+  var payload={type:'kb-extra',version:2,exported:new Date().toISOString(),
+    arts:extra, edits:Object.keys(edits).map(function(id){return edits[id]}), favs:S.favs, hist:S.hist};
   var blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
   var a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
   a.download='kb-backup-'+new Date().toISOString().slice(0,10)+'.json';
   document.body.appendChild(a); a.click();
   setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},600);
-  toast('已导出 '+ARTS.length+' 条（含收藏/历史）');
+  toast('已导出 '+extra.length+' 条导入笔记、'+Object.keys(edits).length+' 条本地修改及星标/历史');
 }
 function doImport(){
   var inp=document.createElement('input'); inp.type='file'; inp.accept='.json,application/json';
   inp.addEventListener('change',function(){
     var f=inp.files&&inp.files[0]; if(!f) return;
+    if(f.size>8*1024*1024){toast('文件超过 8 MB，请拆分后导入');return}
     var fr=new FileReader();
+    fr.onerror=function(){toast('读取文件失败，请重试')};
     fr.onload=function(){
-      try{
-        var o=JSON.parse(fr.result);
-        var list=o.arts||o;
-        if(!Array.isArray(list)) throw new Error('格式不对');
-        var added=0;
-        list.forEach(function(a){
-          if(!a||!a.id||!a.html) return;
-          if(ARTS.some(function(x){return x.id===a.id})) return;
-          a.cat=a.cat||'imported'; a.tags=a.tags||[]; a.title=a.title||a.id;
-          a.summary=a.summary||''; a.outline=a.outline||[]; a.words=a.words||0; a.read=a.read||1;
-          extra.push(a); a._plain=plain(a.html); ARTS.push(a); byId[a.id]=a;
-          INDEX.push({a:a,t:(a.title+' '+a.tags.join(' ')).toLowerCase(),g:a.tags.join(' ').toLowerCase(),x:a._plain.toLowerCase()});
-          added++;
-        });
-        if(o.favs&&o.favs.length){o.favs.forEach(function(id){if(S.favs.indexOf(id)<0)S.favs.push(id)});LS.set('favs',S.favs)}
-        LS.set('extra',extra);
-        renderSide(); location.hash==='#/'?viewHome():route();
-        toast(added?('已导入 '+added+' 条知识'):'没有新条目（id 已存在）');
-      }catch(e){toast('导入失败：'+e.message)}
+      try{importNotes(JSON.parse(fr.result))}catch(e){toast('导入失败：'+e.message)}
     };
     fr.readAsText(f,'utf-8');
   });
@@ -1246,6 +1215,7 @@ panel.addEventListener('click',function(e){
   if(e.target===panel){ qEl.value=''; closeSearch() }
 });
 document.addEventListener('keydown',function(e){
+  if(editor.open) return;
   var tag=(e.target.tagName||'').toLowerCase();
   var typing=tag==='input'||tag==='textarea'||e.target.isContentEditable;
   if((e.key==='/'&&!typing)||((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k')){
@@ -1277,12 +1247,15 @@ document.addEventListener('click',function(e){
     if(blk.classList.contains('collapsed')){ if(i<0) S.collapsed.push(id) } else { if(i>=0) S.collapsed.splice(i,1) }
     LS.set('collapsed',S.collapsed); return;
   }
+  if(t.dataset.act==='edit-note') openEditor(S.cur);
+  if(t.dataset.act==='reset-note') resetNote(S.cur);
   if(t.dataset.act==='export') doExport();
   if(t.dataset.act==='import') doImport();
   if(t.dataset.act==='print') window.print();
 });
 window.addEventListener('hashchange',route);
 window.addEventListener('keydown',function(e){
+  if(editor.open) return;
   if(e.key==='j'||e.key==='k'){
     var tag=(e.target.tagName||'').toLowerCase();
     if(tag==='input'||tag==='textarea') return;
@@ -1299,6 +1272,8 @@ window.addEventListener('keydown',function(e){
     pick(byId[links[nx].dataset.art]);
   }
 });
+
+/* %%NOTE_EDITOR%% */
 
 /* ---------------- 启动 ---------------- */
 applyTheme(); applyFs(); renderSide(); bindProgress(); route();
@@ -1355,8 +1330,8 @@ def main():
     assert "</script" not in payload.lower()
 
     out = (HTML_SHELL
-           .replace("%%CSS%%", CSS)
-           .replace("%%JS%%", JS)
+           .replace("%%CSS%%", CSS + (HERE / "note-editor.css").read_text())
+           .replace("%%JS%%", JS.replace("/* %%NOTE_EDITOR%% */", (HERE / "note-editor.js").read_text()))
            .replace("%%DATA%%", payload))
 
     # ---- 交付前断言（只针对正文内容，不扫 JS 模板串）----
