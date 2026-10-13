@@ -1,0 +1,15 @@
+{
+  "id": "rag-interview-questions",
+  "cat": "backend-eng",
+  "title": "rag · 面试问答手册",
+  "summary": "围绕真实架构和证据组织 13 组面试问答，明确区分审查、隔离复现、建议方案与生产验证。",
+  "tags": [
+    "rag",
+    "工程审查",
+    "FastAPI",
+    "React",
+    "Elasticsearch"
+  ],
+  "kicker": "rag 工程审查 · 06/06 · 2026-10-13 · 37ac973 / 3c4cd2a / 56fe651",
+  "order": 10
+}

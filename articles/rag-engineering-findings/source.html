@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>rag · 工程问题清单</title><style>body{max-width:960px;margin:40px auto;padding:0 20px;font:17px/1.75 system-ui}img{max-width:100%}pre{overflow:auto;padding:16px;background:#f5f5f5}table{display:block;overflow:auto;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px}code{font-family:monospace}</style></head><body>
+<main><h1 id="rag--工程问题清单">rag · 工程问题清单</h1>
+<p>审查日期：2026-10-13（Asia/Shanghai）。项目：<code>NicholasZhao-zhenglin/rag</code>；总仓库 <code>37ac973e4580442542853bb241e3286caa90dfc3</code>，后端 <code>3c4cd2ac1f11c862e31f423054cbef7b3960c7b8</code>，前端 <code>56fe6519426174e1b6d8f421bdbeb92e742cc4a4</code>。下文源码路径均相对于 rag 根目录。审查和隔离验证已执行；业务修复与路线图均未实施。</p>
+<p>阅读顺序：<a href="index.html#/a/rag-system-architecture">01 系统架构分析</a> → <a href="index.html#/a/rag-core-call-chains">02 核心代码调用链</a> → <a href="index.html#/a/rag-engineering-findings">03 工程问题清单</a> → <a href="index.html#/a/rag-optimization-roadmap">04 优化路线图</a> → <a href="index.html#/a/rag-engineering-handbook">05 工程知识学习手册</a> → <a href="index.html#/a/rag-interview-questions">06 面试问答手册</a>。</p>
+<h2 id="判级与证据规则">判级与证据规则</h2>
+<p>P0 指有证据支持的灾难事故；本轮未确认 P0。P1 是关键功能失败、数据/资源边界风险；P2 是需排期的一致性、交付或维护缺陷；P3 是低风险演进。优先级依据触发场景，不等于证据强度。</p>
+<p>“隔离复现”使用真实函数 AST 与合成数据，绕过模块级外部初始化；不代表应用可完整启动。“静态确认”只覆盖看到的实现；“待确认”不混入已确认问题。所有 F 项当前均<strong>未修复</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>编号</th>
+<th>优先级</th>
+<th>问题</th>
+<th>证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>F01</td>
+<td>P1</td>
+<td>登录与历史接口缺失，页面准入链不闭合</td>
+<td>P01，静态前端调用</td>
+</tr>
+<tr>
+<td>F02</td>
+<td>P1</td>
+<td>上传与新聊天使用不同索引</td>
+<td>P02</td>
+</tr>
+<tr>
+<td>F03</td>
+<td>P1</td>
+<td>凭据硬编码且嵌入配置参数被覆盖</td>
+<td>静态确认，未试用凭据</td>
+</tr>
+<tr>
+<td>F04</td>
+<td>P1</td>
+<td>无服务端授权与路径约束，可写出会话目录</td>
+<td>P03 + 静态读写链</td>
+</tr>
+<tr>
+<td>F05</td>
+<td>P1</td>
+<td>bulk 错误被吞并，上传成功不可信</td>
+<td>P04、P07</td>
+</tr>
+<tr>
+<td>F06</td>
+<td>P2</td>
+<td>async 路由直接执行同步重任务、缺少服务端上传上限</td>
+<td>静态路径风险，未压测</td>
+</tr>
+<tr>
+<td>F07</td>
+<td>P2</td>
+<td>XLSX/JSON 路径上传未向解析器交付数据</td>
+<td>P06</td>
+</tr>
+<tr>
+<td>F08</td>
+<td>P2</td>
+<td>chunk 标识不含文档身份，重复段落覆盖归属</td>
+<td>P05 + bulk index 操作</td>
+</tr>
+<tr>
+<td>F09</td>
+<td>P1</td>
+<td>不可信 Markdown 直接进入 HTML 注入点</td>
+<td>P10 + 静态 DOM 接线</td>
+</tr>
+<tr>
+<td>F10</td>
+<td>P2</td>
+<td>流内错误被当作答案，取消与终态不完整</td>
+<td>P09 + 静态状态机</td>
+</tr>
+<tr>
+<td>F11</td>
+<td>P2</td>
+<td>默认依赖安装失败，现有 lint 门禁不通过</td>
+<td>npm 命令实测</td>
+</tr>
+<tr>
+<td>F12</td>
+<td>P2</td>
+<td>部署入口、资源与依赖缺少可复现闭环</td>
+<td>静态配置；未启动部署</td>
+</tr>
+</tbody>
+</table>
+<h2 id="f01--登录与历史接口缺失">F01 · 登录与历史接口缺失</h2>
+<p><strong>位置：</strong> <code>backend/app/app_main.py::app</code>；<code>router/chat_rt.py</code> 三个装饰路由；<code>frontend/src/api/user.ts</code>、<code>api/session.ts</code>、<code>router/guard/auth.tsx</code>。</p>
+<p><strong>触发与机制：</strong> 新浏览器没有 token，业务页面默认需要 auth，跳转登录后请求不存在的后端接口；历史入口同样没有实现。<strong>影响：</strong> 该前后端锁定组合无法完成常规登录和会话刷新恢复，不代表所有自定义代理部署都如此。<strong>验证：</strong> P01 对实际路由函数注册出的隔离 FastAPI 应用检查四个接口，均 404。</p>
+<p><strong>修复方向：</strong> 先明确单用户演示或认证产品的契约；实现配套后端或明确关闭不支持的 UI 能力，不能仅在 localStorage 伪造 token。<strong>验收：</strong> 干净浏览器进入、登录/准入、创建会话、刷新恢复有一致行为；前端调用清单全部匹配 OpenAPI，未知路径继续 404。</p>
+<h2 id="f02--文件写入-default聊天查随机-session">F02 · 文件写入 default，聊天查随机 session</h2>
+<p><strong>位置：</strong> <code>frontend/src/api/session.ts::upload/chat</code>，<code>pages/index/index.tsx::send</code>，<code>backend/app/router/chat_rt.py::upload_files/chat_on_docs</code>，<code>file_parse.py::execute_insert_process</code>。</p>
+<p><strong>触发与机制：</strong> RepositoryUpload 不传 session_id，后端用 default；主页随后新建随机 session 并以其作为 ES 索引查询，没有建立关联。<strong>影响：</strong> 正常上传→新聊天链无法检索刚上传的那份集合。<strong>证据：</strong> P02 记录真实路由对 fake 入库/检索的实参，分别是 default 与新 ID；未模拟 ES 索引存在性。</p>
+<p><strong>修复方向：</strong> 明确 knowledge_base_id 与 conversation_id 的不同职责，短期也可统一显式 ID，但必须验证授权。<strong>验收：</strong> 上传合成标记文本，新建/继续指定知识库会话可返回该标记的引用；另一知识库不会命中。</p>
+<h2 id="f03--配置与凭据边界失效">F03 · 配置与凭据边界失效</h2>
+<p><strong>位置：</strong> <code>backend/app/service/ragflow/file_parse.py::generate_embedding</code>，<code>rag/nlp/model.py::generate_embedding</code>，<code>chat.py</code> 两个模型入口，<code>rag/utils/es_conn.py::ESConnection.__init__</code>。</p>
+<p><strong>触发与机制：</strong> 源码含可用于凭据位置的硬编码字符串；embedding 函数直接覆盖 api_key/base_url 参数，chat 使用硬编码 fallback，ES 连接也不通过统一配置解析。<code>.env</code> 随源码快照提供，但本轮未读取其值。<strong>影响：</strong> 仓库可读者可接触嵌入凭据，调用者难以可靠切换账户；有效性与是否发生滥用未验证。正文和探针结果不保存字面凭据。</p>
+<p><strong>修复方向：</strong> 由维护者轮换相关凭据，移除 fallback 和参数覆盖，启动时校验必需配置；是否清理历史按仓库政策另行决策。<strong>验收：</strong> 无配置时在启动阶段明确失败；注入合成配置时 fake 客户端只收到合成值；扫描输出仅报位置不泄露值；本轮没有执行轮换或改写历史。</p>
+<h2 id="f04--路径输入与索引选择没有授权约束">F04 · 路径输入与索引选择没有授权约束</h2>
+<p><strong>位置：</strong> <code>router/chat_rt.py::upload_files</code>（49 行起）、<code>chat_on_docs</code>；<code>rag/nlp/search_v2.py::retrieval</code> 的 tenant_ids 拆分；<code>rag/utils/es_conn.py::search</code>。</p>
+<p><strong>触发与机制：</strong> 请求者能访问 API 时，session_id、filename 直接交给 os.path.join，未限制父目录/绝对路径；服务端没有 Depends 身份校验，session_id 又直接决定写入或查询索引。<strong>影响：</strong> 可越过预期会话目录写文件，范围受进程文件权限限制；可选择任意字符串作为检索命名空间，实际 ES 可访问数据范围未在线测试。随机 session ID 不是访问控制。</p>
+<p><strong>验证：</strong> P03 只在临时根下分别使用父路径片段，观察到文件落到预期子目录之外，HTTP 200，无真实文件破坏。API 三路由没有鉴权是静态确认。</p>
+<p><strong>修复方向：</strong> 服务端生成存储名；对解析后的路径做根内约束并防符号链接逃逸；通过用户/知识库映射选择索引，不接受任意索引表达式。<strong>验收：</strong> 父路径、绝对路径、另一用户知识库 ID 返回 4xx 且磁盘/ES 零副作用；合法中文文件名可作为展示元数据保留。</p>
+<h2 id="f05--es-错误未传播到用户成功状态">F05 · ES 错误未传播到用户成功状态</h2>
+<p><strong>位置：</strong> <code>file_parse.py::execute_insert_process</code>（83 行起）；<code>rag/utils/es_conn.py::insert</code>（136 行起）；<code>router/chat_rt.py::upload_files</code>。</p>
+<p><strong>机制：</strong> ES bulk item 错误以列表返回，调用者忽略；非超时异常分支先 append 错误再将 res 清空，两轮后可返回 []；原文件写入没有回滚。<strong>影响：</strong> 用户看到成功但索引可能部分或完全没有写入。<strong>验证：</strong> P04 注入 bulk 错误列表仍 HTTP 200/success；P07 两次合成非超时异常最终返回 []。二者未接真实 ES。</p>
+<p><strong>修复方向：</strong> 定义 InsertResult 的成功数/失败项，明确重试边界；仅已发布的有效版本标为 ready，保留失败状态供重试。<strong>验收：</strong> 部分失败、认证失败、超时都不返回整体成功；相同操作重试不重复发布、不遗留错误可见版本。bulk 按项结果语义核对 <a href="https://www.elastic.co/guide/en/elasticsearch/reference/8.11/docs-bulk.html">Elasticsearch 8.11 官方说明</a>。</p>
+<h2 id="f06--请求线程承担无界同步工作">F06 · 请求线程承担无界同步工作</h2>
+<p><strong>位置：</strong> <code>router/chat_rt.py::upload_files/chat_on_docs</code>；<code>file_parse.py::execute_insert_process</code>。<strong>触发：</strong> 上传大文件、多文件，或模型/ES 较慢时，async 路由在 await 之后直接调用同步解析、逐块嵌入和检索，期间没有让出事件循环的应用级操作；文件 read 无 size 参数，客户端 5 MiB 限制可绕过。</p>
+<p><strong>影响与限制：</strong> 单个 worker 可被同步工作占用，内存需求随文件大小增长；没有测量耗尽、并发容量或实际延迟，不称为已发生泄漏。settings 中的 DOC_MAXIMUM_SIZE 没被上传入口使用。</p>
+<p><strong>修复方向：</strong> 首先服务端流式计数与配额、明确总超时；有界线程池隔离同步 I/O，CPU/OCR 有需要再迁到任务 worker。<strong>验收：</strong> 超限文件在阈值处停止写入；受控慢依赖下轻量请求可在明确预算内响应；取消后资源释放，并记录队列上限。</p>
+<h2 id="f07--格式分支接受路径却使用空-binary">F07 · 格式分支接受路径却使用空 binary</h2>
+<p><strong>位置：</strong> <code>file_parse.py::parse</code>；<code>rag/app/naive.py::chunk</code> XLSX/JSON 分支；<code>deepdoc/parser/excel_parser.py::__call__</code> 与 <code>json_parser.py::__call__</code>。</p>
+<p><strong>触发与机制：</strong> 上传只传 file_path，binary 默认 None；XLSX 分支把 None 放进 BytesIO 后交 openpyxl，JSON 分支对 None 解码。<strong>验证：</strong> P06 在临时目录生成有效 xlsx/json，实际 chunk 路径得到 BadZipFile/AttributeError。<strong>影响：</strong> 这些格式不能通过当前路径入口，PDF/TXT 不据此判坏。</p>
+<p><strong>修复方向：</strong> 统一 parser 输入协议，显式传 filename 或读取 bytes；格式不支持时在写入昂贵存储前给 4xx。<strong>验收：</strong> 两格式用同一上传入口形成预期非空 chunk；损坏格式明确失败、不报告成功。旧 DOC 的 Tika 适配同样值得复查，但本轮未接线验证。</p>
+<h2 id="f08--内容哈希不能表达文档归属">F08 · 内容哈希不能表达文档归属</h2>
+<p><strong>位置：</strong> <code>file_parse.py::process_item</code>（42 行起）、<code>es_conn.py::insert</code>。<strong>触发：</strong> 同 session 中两个文件含同一段落。<strong>机制：</strong> chunk hash 仅含内容和 session；ES 使用 index 同 ID 操作，第二份文档覆盖第一份的 doc_id/文档名。<strong>验证：</strong> P05 两个文件得到同一 chunk id 和不同 doc_id；实际 ES 覆盖未在线运行。</p>
+<p><strong>修复方向：</strong> 用文档稳定 ID、版本、chunk 序号确定身份；如确需内容去重，将内容实体与多文档归属分开。<strong>验收：</strong> 相同段落属于多个文件时保留全部来源；替换同名文档后旧版本不混入检索；失败版本不替换已发布版本。</p>
+<h2 id="f09--markdown-的-html-信任边界未建立">F09 · Markdown 的 HTML 信任边界未建立</h2>
+<p><strong>位置：</strong> <code>frontend/src/components/markdown/index.tsx::Markdown</code>；调用点含聊天回答与引用 Drawer。<strong>触发：</strong> 模型输出或文档引用含原始 HTML/事件属性。<strong>机制：</strong> Marked.parse 结果未经清洗直接进入 dangerouslySetInnerHTML。<strong>证据：</strong> P10 对锁定 Marked 15.0.7 的合成字符串验证属性保留；未在浏览器执行攻击代码，也未读取真实 token。风险级别考虑浏览器用户状态同源可访问，不能据此声称凭据已被窃取。</p>
+<p><strong>修复方向：</strong> 采用严格标签/属性白名单，或禁用原始 HTML；同时保留需要的引用标记。<strong>验收：</strong> 合成危险属性与协议被移除，中文、表格、代码块和引用链接仍正确。官方明确 Markdown 解析并不提供 HTML 清洗：<a href="https://github.com/markedjs/marked">Marked 文档</a>。</p>
+<h2 id="f10--流的错误结束与取消状态不对称">F10 · 流的错误、结束与取消状态不对称</h2>
+<p><strong>位置：</strong> <code>chat.py::get_chat_completion</code>、<code>frontend/src/pages/chat/index.tsx::sendChat/read/parseData</code>。<strong>触发：</strong> 后端生成器发 event:error、模型非 stop 结束、用户离开页面。<strong>机制：</strong> 前端忽略 event/role，error content 被拼入 assistant 正文；end 不是必需终态；卸载不主动 cancel。<strong>验证：</strong> P09 用真实 parseData 函数收到 role:error 后，target.content 增加而 target.error 未设置。其他分支静态确认，未测供应商取消计费行为。</p>
+<p><strong>修复方向：</strong> 定义 message/documents/error/end 的状态机和总预算，绑定 AbortController/reader 生命周期；推荐问题失败不应抹去已完成答案。<strong>验收：</strong> 故障显示独立错误且保留已生成内容；所有结束原因有终态；中断可被追踪，不无条件自动重发整次付费请求。</p>
+<h2 id="f11--默认安装与质量门禁无法直接重现">F11 · 默认安装与质量门禁无法直接重现</h2>
+<p><strong>位置：</strong> <code>frontend/package.json</code>、<code>package-lock.json</code>、<code>eslint.config.js</code> 及 lint 报告定位。<strong>验证：</strong> Node 24.21.0 下默认 <code>npm ci --ignore-scripts --no-audit --no-fund</code> 退出 1（ahooks 3.8.4 peer React ≤18 与 React 19 冲突）。在隔离副本用 legacy peer 模式后构建成功；lint 退出 1，26 errors、10 warnings。</p>
+<p><strong>影响：</strong> 新环境默认安装不通，门禁不能直接作为绿色基线；并不证明 React 19 在所有 UI 场景运行失败。<strong>修复方向：</strong> 选择相互支持的依赖组合并锁定 Node/npm，修复或有理由地调整规则；不将忽略 peer 作为默认质量结论。<strong>验收：</strong> 干净检出默认安装、build、lint 都成功，核心 React hooks/stream 行为有回归覆盖。</p>
+<h2 id="f12--启动与发布依赖隐含本机条件">F12 · 启动与发布依赖隐含本机条件</h2>
+<p><strong>位置：</strong> <code>backend/app/Dockerfile</code>、<code>docker-compose.yml</code>、<code>nginx_certbot/https.conf</code>、<code>start_backend.sh</code>、<code>rag/nlp/rag_tokenizer.py</code>、<code>deepdoc/parser/pdf_parser.py</code>。</p>
+<p><strong>机制与前提：</strong> 自定义基础镜像来源缺失；模型/NLP 资源需要外部准备；后端关键 SDK 版本未锁定；ES 客户端固定使用 Compose DNS，与宿主机启动方式不天然相容；单独 Nginx 目标端口与当前主机映射不一致。<strong>影响：</strong> 新机器或把零散配置拼为部署时可能启动失败、降级分词或不能转发 API。只确认配置差异，没有做 Docker 构建、DNS/端口实测。</p>
+<p><strong>修复方向：</strong> 定义一种可复现开发方式和一种部署拓扑；统一 Settings、固定依赖/资源摘要、startup/readiness 自检与部署契约。<strong>验收：</strong> 空缓存环境按文档启动，缺资源可诊断；API→ES、代理→API 与 SSE 首帧实测；不要求本轮新增部署基础设施。</p>
+<h2 id="待确认与覆盖限制">待确认与覆盖限制</h2>
+<p>Q01：重排适配器是否按得分重新排序、分数与候选 ID 是否错配。P08 仅验证此返回顺序下当前包装会丢身份；实际 <code>llama-index-postprocessor-dashscope-rerank-custom</code> 没有锁定版本，本轮不下载调用供应商，不能列为已证实生产排序缺陷。</p>
+<p>没有执行线上负载、OCR 质量评测、模型输出正确性或真实 ES 写入。本轮不对所有内嵌 DeepDOC 算法作全仓安全审计，也不把尚未接线的 eval/演示代码认定为当前 HTTP 可达漏洞。</p>
+<p>本地 <code>evidence/probe_backend.py</code>、<code>probe_frontend.cjs</code> 与两份 results.json 保存小型复现；探针断言的是缺陷存在，修复后应改成正确行为的回归测试。证据附件只留项目本地，不随六篇公开正文上传；正文已包含触发条件、结果和边界。</p>
+</main>
+</body></html>

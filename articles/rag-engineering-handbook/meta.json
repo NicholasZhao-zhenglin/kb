@@ -1,0 +1,15 @@
+{
+  "id": "rag-engineering-handbook",
+  "cat": "backend-eng",
+  "title": "rag · 工程知识学习手册",
+  "summary": "借本项目的版本契约、文档身份、并发、批量提交、解析适配和流状态讲解工程机制，附建议练习。",
+  "tags": [
+    "rag",
+    "工程审查",
+    "FastAPI",
+    "React",
+    "Elasticsearch"
+  ],
+  "kicker": "rag 工程审查 · 05/06 · 2026-10-13 · 37ac973 / 3c4cd2a / 56fe651",
+  "order": 9
+}

@@ -1,0 +1,15 @@
+{
+  "id": "rag-engineering-findings",
+  "cat": "backend-eng",
+  "title": "rag · 工程问题清单",
+  "summary": "12 项未修复工程问题与 1 项待确认风险，给出触发条件、源码定位、隔离探针、修复方向和验收。",
+  "tags": [
+    "rag",
+    "工程审查",
+    "FastAPI",
+    "React",
+    "Elasticsearch"
+  ],
+  "kicker": "rag 工程审查 · 03/06 · 2026-10-13 · 37ac973 / 3c4cd2a / 56fe651",
+  "order": 7
+}

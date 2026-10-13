@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>rag · 优化路线图</title><style>body{max-width:960px;margin:40px auto;padding:0 20px;font:17px/1.75 system-ui}img{max-width:100%}pre{overflow:auto;padding:16px;background:#f5f5f5}table{display:block;overflow:auto;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px}code{font-family:monospace}</style></head><body>
+<main><h1 id="rag--优化路线图">rag · 优化路线图</h1>
+<p>审查日期：2026-10-13（Asia/Shanghai）。项目：<code>NicholasZhao-zhenglin/rag</code>；总仓库 <code>37ac973e4580442542853bb241e3286caa90dfc3</code>，后端 <code>3c4cd2ac1f11c862e31f423054cbef7b3960c7b8</code>，前端 <code>56fe6519426174e1b6d8f421bdbeb92e742cc4a4</code>。下文源码路径均相对于 rag 根目录。审查和隔离验证已执行；业务修复与路线图均未实施。</p>
+<p>阅读顺序：<a href="index.html#/a/rag-system-architecture">01 系统架构分析</a> → <a href="index.html#/a/rag-core-call-chains">02 核心代码调用链</a> → <a href="index.html#/a/rag-engineering-findings">03 工程问题清单</a> → <a href="index.html#/a/rag-optimization-roadmap">04 优化路线图</a> → <a href="index.html#/a/rag-engineering-handbook">05 工程知识学习手册</a> → <a href="index.html#/a/rag-interview-questions">06 面试问答手册</a>。</p>
+<h2 id="目标与排序依据">目标与排序依据</h2>
+<p>以下全部是<strong>建议实施</strong>，本轮仅完成审查与离线验证。当前最重要的目标是让一个授权用户完成“进入页面→上传文档→基于正确集合回答→失败可见”的闭环，再讨论吞吐量。没有真实负载与检索质量基线，不给出提升倍数、并发人数或固定工期。</p>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>具体交付</th>
+<th>对应问题</th>
+<th>前置依赖</th>
+<th>可观察退出条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A：建立信任与输入边界</td>
+<td>清除凭据 fallback、服务器身份/知识库授权、路径约束、Markdown 清洗</td>
+<td>F03/F04/F09</td>
+<td>确定单用户还是多用户产品边界</td>
+<td>未授权/越界输入无副作用，合成 HTML 不执行，配置缺失 fail fast</td>
+</tr>
+<tr>
+<td>B：打通最小使用链</td>
+<td>定义会话与知识库 ID、实现准入及历史契约或明确精简 UI、统一上传解析输入</td>
+<td>F01/F02/F07</td>
+<td>A 的身份与数据归属</td>
+<td>干净浏览器完成上传问答；刷新/不支持功能有明确行为</td>
+</tr>
+<tr>
+<td>C：让状态可信</td>
+<td>bulk 错误结构、文件版本/chunk 身份、索引 ready 发布、SSE 终态与取消</td>
+<td>F05/F08/F10</td>
+<td>B 的 ID 与接口契约</td>
+<td>故障不报成功、旧版本可继续读取、流错误不冒充正文</td>
+</tr>
+<tr>
+<td>D：可复现与有界执行</td>
+<td>peer 依赖、lint、运行资源清单、统一配置、上传配额、有界执行器</td>
+<td>F06/F11/F12</td>
+<td>A–C 的回归用例</td>
+<td>默认安装/构建/检查通过；慢任务不无界占用；部署拓扑实测</td>
+</tr>
+<tr>
+<td>E：质量与规模演进</td>
+<td>带标注语料评测、重排顺序契约测试，再决定队列与 worker</td>
+<td>Q01 与产品目标</td>
+<td>可靠闭环与测量系统</td>
+<td>指标可重复，能解释错误归因；升级由瓶颈触发</td>
+</tr>
+</tbody>
+</table>
+<p>A 与默认安装整理可以并行推进，但先修某个 npm 报错不能替代后端闭环。每阶段应是可独立评审的小变更，不把所有问题捆绑为框架重写。</p>
+<h2 id="建议接口与状态模型未实施">建议接口与状态模型（未实施）</h2>
+<p>将 conversation_id 表示会话、knowledge_base_id 表示资料集合、document_id 表示文件逻辑身份、version 表示一次发布、job_id 表示处理执行。服务端从授权上下文决定存储边界，浏览器不直接决定 ES 索引表达式。小型单用户部署可以先用简单持久化实现，不能因此跳过状态契约。</p>
+<pre><code class="language-mermaid">flowchart LR
+  U[授权上传] --&gt; V[输入与配额检查]
+  V --&gt; S[staged 文件版本]
+  S --&gt; W[有界解析与嵌入]
+  W --&gt; I[写入未发布索引版本]
+  I --&gt; R[验证成功并标记 ready]
+  R --&gt; Q[检索只读 ready 版本]
+  W --&gt; F[failed 可诊断状态]
+  I --&gt; F
+</code></pre>
+<p>这是建议的数据发布顺序，不是当前代码已有队列。可先同步执行 W，但所有失败仍需留下可靠的状态；若引入后台 worker，任务状态与重复执行幂等性先于队列技术选型。</p>
+<p>建议 SSE 事件携带 request_id、type、payload 和终态；error 是业务事件，不等于追加一段回答。客户端离开页面应主动取消传输，服务器再按 SDK 能力关闭流；记录哪些边界只能停止本地消费，不能保证供应商立即停止生成。</p>
+<h2 id="关键决策与取舍">关键决策与取舍</h2>
+<table>
+<thead>
+<tr>
+<th>决策</th>
+<th>保留现状的代价</th>
+<th>最小可行改造</th>
+<th>进一步升级的触发信号</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>同步解析还是任务队列</td>
+<td>worker 被长任务占用，失败不可追踪</td>
+<td>有界线程/进程执行器与 job 状态</td>
+<td>长任务显著超过请求预算，需要重启恢复或跨机扩容</td>
+</tr>
+<tr>
+<td>session 对应 ES 索引</td>
+<td>文档集合与对话生命周期耦合，索引数量增长</td>
+<td>显式知识库 ID 与服务端归属映射</td>
+<td>测得分片开销后比较共享索引+严格过滤；不预先强制迁移</td>
+</tr>
+<tr>
+<td>chunk 内容去重</td>
+<td>丢失多文档来源</td>
+<td>doc/version/chunk ordinal 作为写入 ID</td>
+<td>重复存储成为真实成本后再引入内容实体与归属关联</td>
+</tr>
+<tr>
+<td>上传成功定义</td>
+<td>bulk 调用结束不等于可检索</td>
+<td>检查失败项、刷新/可见性策略与 ready 状态</td>
+<td>大批量下测量 refresh 成本，再设计批次发布</td>
+</tr>
+<tr>
+<td>认证产品还是内部演示</td>
+<td>UI 与 API 能力不一致</td>
+<td>明确契约；不可用功能显式隐藏或实现</td>
+<td>多用户共享资料时必须做服务端授权与审计</td>
+</tr>
+<tr>
+<td>模型与检索配置</td>
+<td>硬编码难复现、缺总预算</td>
+<td>一个配置对象与 typed gateway</td>
+<td>多供应商差异真实出现后再增适配器</td>
+</tr>
+</tbody>
+</table>
+<h2 id="迁移与回退">迁移与回退</h2>
+<p>F02/F08 涉及标识和存量索引。先记录旧 session/index 与文件清单，仅对可确认归属的数据建立映射；无会话表的旧数据不能猜测所有者。新 schema 写入新版本或新命名空间，离线比对文件数、chunk 数、内容摘要与引用归属；通过后切读，旧索引保留到确认回滚窗口结束。不要就地删旧块后再做高风险重建。</p>
+<p>接口变更可暂时接受旧字段，但由服务器解析为明确的知识库关系并告警；禁止“兼容模式”重新开放任意索引选择。回退应能切回旧发布指针并暂停新写入；凭据轮换与撤销旧凭据不能当作可随意回退的状态，旧秘密不得恢复到源码。</p>
+<h2 id="需要测量什么">需要测量什么</h2>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>测量位置</th>
+<th>如何确定目标</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>文档可见成功率、失败原因</td>
+<td>upload/job 状态与 ES 验证</td>
+<td>以合成 fixture 完全正确为门槛，再测真实格式</td>
+</tr>
+<tr>
+<td>首帧与完成延迟</td>
+<td>请求、检索、答案流、推荐请求分别打点</td>
+<td>按交互预算设分位数目标，不拿构建时间当响应速度</td>
+</tr>
+<tr>
+<td>峰值内存、活动任务、排队时间</td>
+<td>有界执行器与 worker</td>
+<td>从最大允许文件/页数和机器预算推导</td>
+</tr>
+<tr>
+<td>命中、引用准确率、拒答率</td>
+<td>标注问题/文档集</td>
+<td>冻结语料与模型版本，人工判定少量困难样本</td>
+</tr>
+<tr>
+<td>超时与取消后的活跃请求</td>
+<td>gateway 与客户端流</td>
+<td>假网关可观察资源关闭；真实 SDK 再做授权集成</td>
+</tr>
+<tr>
+<td>文档重传幂等性</td>
+<td>同一 document/version 重试</td>
+<td>chunk/归属不重复，旧版本不混入</td>
+</tr>
+</tbody>
+</table>
+<h2 id="验证矩阵与推广">验证矩阵与推广</h2>
+<p>先把本轮缺陷探针转为期望正确行为的回归：P01/P02 验证契约与资料集合，P03 验证根内路径与授权，P04/P07 注入部分失败/不可用，P05 检查文档归属，P06 走完整格式入口，P09/P10 检查流与 HTML 边界。P08 加上真实适配器固定版本的节点身份顺序测试后才关闭 Q01。</p>
+<p>下一层是独立临时 ES 的集成，测试 bulk 部分失败与 refresh 可见性；再是使用合成文档、受控模型假服务的浏览器端到端。最后才运行真实模型与部署检查，明确预算、资源与数据范围。生产压测不是本轮检查的隐含授权。</p>
+<p>问题关闭必须记录修复提交、回归命令、环境和失败路径结果，更新 03 状态、01/02 当前行为与根目录交接文件。不要用“探针仍然复现旧 bug”作为修复验收，也不要把方案写成已上线成果。</p>
+</main>
+</body></html>

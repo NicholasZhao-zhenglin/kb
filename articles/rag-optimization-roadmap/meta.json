@@ -1,0 +1,15 @@
+{
+  "id": "rag-optimization-roadmap",
+  "cat": "backend-eng",
+  "title": "rag · 优化路线图",
+  "summary": "依据审查问题分阶段建议实施安全边界、使用闭环、可信状态与可复现部署，并定义迁移和验证策略。",
+  "tags": [
+    "rag",
+    "工程审查",
+    "FastAPI",
+    "React",
+    "Elasticsearch"
+  ],
+  "kicker": "rag 工程审查 · 04/06 · 2026-10-13 · 37ac973 / 3c4cd2a / 56fe651",
+  "order": 8
+}

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>rag · 系统架构分析</title><style>body{max-width:960px;margin:40px auto;padding:0 20px;font:17px/1.75 system-ui}img{max-width:100%}pre{overflow:auto;padding:16px;background:#f5f5f5}table{display:block;overflow:auto;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px}code{font-family:monospace}</style></head><body>
+<main><h1 id="rag--系统架构分析">rag · 系统架构分析</h1>
+<p>审查日期：2026-10-13（Asia/Shanghai）。项目：<code>NicholasZhao-zhenglin/rag</code>；总仓库 <code>37ac973e4580442542853bb241e3286caa90dfc3</code>，后端 <code>3c4cd2ac1f11c862e31f423054cbef7b3960c7b8</code>，前端 <code>56fe6519426174e1b6d8f421bdbeb92e742cc4a4</code>。下文源码路径均相对于 rag 根目录。审查和隔离验证已执行；业务修复与路线图均未实施。</p>
+<p>阅读顺序：<a href="index.html#/a/rag-system-architecture">01 系统架构分析</a> → <a href="index.html#/a/rag-core-call-chains">02 核心代码调用链</a> → <a href="index.html#/a/rag-engineering-findings">03 工程问题清单</a> → <a href="index.html#/a/rag-optimization-roadmap">04 优化路线图</a> → <a href="index.html#/a/rag-engineering-handbook">05 工程知识学习手册</a> → <a href="index.html#/a/rag-interview-questions">06 面试问答手册</a>。</p>
+<h2 id="架构判断">架构判断</h2>
+<p>这是通过 Git 子模块组合的文档问答原型：React 浏览器端调用 FastAPI；后端在同一个服务进程内解析文档、调用远程嵌入与重排服务、访问 Elasticsearch，再流式调用对话模型。它没有独立任务 worker、持久会话服务或已接线的后端身份体系。当前锁定的前后端版本存在接口与知识库标识错配，不能把页面齐全或构建成功解释为完整产品可用。</p>
+<p>证据入口是 <code>.gitmodules</code>、<code>backend/app/app_main.py::app</code>、<code>backend/app/router/chat_rt.py</code>、<code>frontend/src/api/session.ts</code> 与 <code>frontend/src/router/routes.tsx</code>。模型相关名称来自当前调用实参，不代表这些服务本轮已被调用。</p>
+<h2 id="基线获取方式与覆盖">基线、获取方式与覆盖</h2>
+<p>总仓库 main 克隆后初始工作区干净。Git 子模块下载因网络停顿未完成，改从 GitHub 已认证 API 下载<strong>固定提交</strong> tarball，解压到 backend、frontend；因此本地内容是锁定版本源码快照，不宣称子模块 Git 初始化成功。本轮没有读取 <code>.env</code> 的值，没有解析根目录业务 PDF，没有运行模型下载入口。</p>
+<table>
+<thead>
+<tr>
+<th>范围</th>
+<th>阅读深度</th>
+<th>实际验证</th>
+<th>未覆盖</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>总仓库、依赖、启动与 Compose</td>
+<td>全部关键配置；排除 IDE 私有状态</td>
+<td>shell 语法检查、版本及文件定位</td>
+<td>Docker 构建、基镜像可用性、生产网络</td>
+</tr>
+<tr>
+<td>API、入库、检索、流式生成</td>
+<td>逐函数追踪默认链</td>
+<td>AST 提取真实函数的离线 TestClient 与适配器探针</td>
+<td>应用完整 import、真实 ES/模型</td>
+</tr>
+<tr>
+<td>React 路由、上传、聊天、状态、Markdown</td>
+<td>核心页面和请求插件深入阅读</td>
+<td>锁文件安装诊断、构建、lint、解析函数探针</td>
+<td>浏览器业务端到端与登录成功</td>
+</tr>
+<tr>
+<td>内嵌 DeepDOC、NLP</td>
+<td>60 个 Python 文件结构与语法覆盖；深入解析入口、分词资源、查询与 ES 实现</td>
+<td>XLSX/JSON 适配边界</td>
+<td>OCR 数学细节、表格模型精度、全部格式样本</td>
+</tr>
+<tr>
+<td>其他工具与演示</td>
+<td>浏览符号与调用关系</td>
+<td>无</td>
+<td>未接线 RAGFlow HTTP 适配器、简历解析、视觉 demo 运行</td>
+</tr>
+</tbody>
+</table>
+<p>实际结果：60 个 Python 文件语法解析通过；8 项后端探针完成，其中 7 项复现确定行为，P08 仅演示重排适配器返回换序结果时的条件风险；2 项前端函数探针完成。默认 <code>npm ci</code> 因 React 19 与 ahooks peer 范围冲突失败；仅在隔离副本使用 <code>--legacy-peer-deps</code> 后安装与 <code>npm run build</code> 成功；<code>npm run lint</code> 为 26 errors、10 warnings。这些不是生产测试通过数。详细机制与探针编号见 03。</p>
+<h2 id="当前运行与数据流">当前运行与数据流</h2>
+<p>下图箭头表示调用或读写，不表示事务、异步队列或部署已成功。</p>
+<pre><code class="language-mermaid">flowchart LR
+  B[React 浏览器端] --&gt;|HTTP 与 SSE| A[FastAPI 单服务进程]
+  A --&gt;|保存原文件| F[本地 storage/file/session]
+  A --&gt;|同步解析与切块| P[内嵌 DeepDOC 与 NLP]
+  P --&gt;|每块嵌入请求| M[远程嵌入 API]
+  A --&gt;|bulk 与混合查询| E[Elasticsearch]
+  A --&gt;|查询嵌入和候选重排| M
+  A --&gt;|答案流与推荐问题| L[远程对话 API]
+  L --&gt;|JSON 数据帧| A
+  A --&gt;|SSE| B
+</code></pre>
+<p>Compose 声明 API 容器与 ES 8.11.3，ES 使用命名卷；模型是远程服务，DeepDOC 缺失权重时还可能在本机下载模型。Nginx 配置和 Dockerfile 单独存在，但没有列入该 Compose 服务。不能把 Nginx、前端静态站与 API 画成已上线的同一部署。<code>start_backend.sh</code> 监听主机 8001；Compose 是主机 8001 → 容器 8000；独立 Nginx 配置指向主机 8000，组合部署需要校准。</p>
+<h2 id="模块为什么存在">模块为什么存在</h2>
+<table>
+<thead>
+<tr>
+<th>模块与源码</th>
+<th>职责和主要依赖</th>
+<th>拥有的状态</th>
+<th>交付与边界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>frontend/src/router</code> 与 <code>store/user.ts</code></td>
+<td>依据浏览器 token 控制路由；依赖 React Router、Valtio</td>
+<td>token 与用户名持久化</td>
+<td>是页面导航检查，不能替代服务端鉴权</td>
+</tr>
+<tr>
+<td><code>frontend/src/api/request</code></td>
+<td>Axios 统一响应、loading、错误提示、重复请求取消</td>
+<td>模块级请求 Map</td>
+<td>HTTP 层成功不等于 SSE 业务成功</td>
+</tr>
+<tr>
+<td><code>frontend/src/pages/repository</code></td>
+<td>选择文件、串行上传、显示文件表</td>
+<td>上传列表与静态示例表</td>
+<td>5 MiB/10 文件是 UI 限制；没有真实列表接口</td>
+</tr>
+<tr>
+<td><code>frontend/src/pages/chat</code></td>
+<td>管理当前消息、消费流、展示引用</td>
+<td>当前页面内存消息与引用</td>
+<td>页面刷新依赖未实现的历史接口</td>
+</tr>
+<tr>
+<td><code>backend/app/router/chat_rt.py</code></td>
+<td>三个 HTTP 用例；依赖 Pydantic、入库、检索、生成函数</td>
+<td>不持久化 session 元数据</td>
+<td>直接驱动同步业务代码</td>
+</tr>
+<tr>
+<td><code>file_parse.py</code> 与 <code>rag/app/naive.py</code></td>
+<td>格式解析、切块、生成向量和标识</td>
+<td>原文件、临时解析对象</td>
+<td>默认 PDF 走 DeepDOC；不等于完整 RAGFlow 服务</td>
+</tr>
+<tr>
+<td><code>rag/nlp/search_v2.py::Dealer</code></td>
+<td>文本与向量召回、候选重排、top 5 返回</td>
+<td>请求内候选、分数数组</td>
+<td>默认链即使 embd_mdl=None 仍调用嵌入与重排</td>
+</tr>
+<tr>
+<td><code>rag/utils/es_conn.py::ESConnection</code></td>
+<td>ES DSL、bulk、有限重试</td>
+<td>进程内 singleton 客户端；加载 mapping</td>
+<td>没有跨文件事务、任务状态或回滚</td>
+</tr>
+<tr>
+<td><code>chat.py</code></td>
+<td>答案流、引用、推荐问题</td>
+<td>生成器局部状态</td>
+<td>不保存历史；session_id 没有用于模型会话状态</td>
+</tr>
+</tbody>
+</table>
+<h2 id="数据事实源与一致性">数据事实源与一致性</h2>
+<p>原文件由 <code>upload_files</code> 写入 <code>storage/file/&lt;session_id&gt;/&lt;filename&gt;</code>，它是文件事实源，但没有版本或 manifest。chunk 文本、分词、向量进入以 session_id 命名的 ES 索引，是检索事实源。浏览器引用卡片是响应的派生状态；仓库页的示例行不是 ES 的镜像。</p>
+<p><code>process_item</code> 的 chunk ID 是内容与 session_id 的 xxhash，doc ID 是文件名的 xxhash。不同文件的相同段落会共用 chunk ID；同名文件重复上传覆盖原文件，却没有清理旧 chunk 的版本发布过程。ES bulk 使用 index 操作与 <code>refresh=False</code>；上传成功不保证检索立即可见，也没有应用层可查询的 ready 状态。F05、F08 分别讨论错误传播和文档身份。</p>
+<p>会话创建只是生成随机 ID 并返回。没有会话表、消息表、数据库迁移、用户与索引归属映射。浏览器 token 持久化与服务端用户状态并不等价，UUID 随机性也不构成授权。</p>
+<h2 id="http-与信任边界">HTTP 与信任边界</h2>
+<table>
+<thead>
+<tr>
+<th>实际路由</th>
+<th>输入</th>
+<th>输出</th>
+<th>主要边界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>POST <code>/create_session</code></td>
+<td>无</td>
+<td>session_id/status/message</td>
+<td>没有持久化或鉴权</td>
+</tr>
+<tr>
+<td>POST <code>/upload_files/</code></td>
+<td>multipart files；query session_id 可省略</td>
+<td>success 或 HTTP 500</td>
+<td>未校验路径、类型大小上限；错误列表可被忽略</td>
+</tr>
+<tr>
+<td>POST <code>/chat_on_docs/</code></td>
+<td>message 字符串；query session_id</td>
+<td>SSE documents/content/thinking/recommended_questions/end/error</td>
+<td>检索在发送流之前；错误帧需客户端识别</td>
+</tr>
+</tbody>
+</table>
+<p>不存在当前前端要求的 <code>/login</code>、<code>/register</code>、<code>/get_sessions/</code>、<code>/get_messages/</code>。README 的 path session_id 示例也不等于当前 query 参数协议。</p>
+<h2 id="依赖初始化与执行上下文">依赖、初始化与执行上下文</h2>
+<p>后端固定 FastAPI 0.115.0、Uvicorn 0.31.0 等部分依赖，但 OpenAI、Elasticsearch、NLP 和解析包大多无版本约束，也没有完整锁文件。Dockerfile 依赖自定义 <code>gsk_poc_base:0.0.1</code>，其构建来源未包含在仓库。分词资源目录、NLTK 数据与模型缓存需要外部准备。</p>
+<p><code>app_main</code> 导入 router，router 导入 file_parse/retrieval，再构造全局 ESConnection 和 Dealer；这些导入发生在 router 本地 <code>load_dotenv()</code> 之前，其他模块也有 dotenv 加载，配置时序不统一。ES 地址及凭据来源另有硬编码；读取 mapping 不等于创建索引或应用 mapping。本轮没有验证实际客户端兼容性。</p>
+<p>前端锁文件核实 React 19.0.0、Vite 6.1.0、TypeScript 5.7.3、Marked 15.0.7、Axios 1.7.9。验证运行时 Python 3.11.9、Node 24.21.0；它们是本轮环境，不是项目已声明支持矩阵。</p>
+<p>上传的同步解析/嵌入与聊天的同步检索在 async 路由内直接调用；并没有自动迁移到任务 worker。StreamingResponse 对同步生成器的消费是另一个边界，本轮安装的 Starlette 0.38.6 用线程池迭代器适配同步迭代；不应把生成流与之前的检索一概称为事件循环阻塞。此语义同时核对本地依赖源码与 <a href="https://fastapi.tiangolo.com/async/">FastAPI 官方说明</a>。</p>
+<h2 id="值得保留的设计">值得保留的设计</h2>
+<p>三仓提交锁定提供可追溯基线；路由与解析/检索/生成文件的分离便于替换外部边界；Pydantic 检查 message 基本类型；SSE 用 <code>json.dumps</code> 构造数据而非手工拼接；前端消息 loading 在 finally 中释放，能避免常规请求异常后一直转圈。ES bulk 保留按项错误的结构、上传 UI 保留逐文件状态，都可成为修复的落点。它们的保障只覆盖对应局部路径，不能掩盖当前契约问题。</p>
+</main>
+</body></html>

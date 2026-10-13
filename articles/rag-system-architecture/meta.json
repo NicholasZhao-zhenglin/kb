@@ -1,0 +1,15 @@
+{
+  "id": "rag-system-architecture",
+  "cat": "backend-eng",
+  "title": "rag · 系统架构分析",
+  "summary": "基于固定前后端子模块提交，解释 React/FastAPI/Elasticsearch 与远程模型的实际边界、状态和验证范围。",
+  "tags": [
+    "rag",
+    "工程审查",
+    "FastAPI",
+    "React",
+    "Elasticsearch"
+  ],
+  "kicker": "rag 工程审查 · 01/06 · 2026-10-13 · 37ac973 / 3c4cd2a / 56fe651",
+  "order": 5
+}

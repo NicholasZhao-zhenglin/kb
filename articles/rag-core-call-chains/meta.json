@@ -1,0 +1,15 @@
+{
+  "id": "rag-core-call-chains",
+  "cat": "backend-eng",
+  "title": "rag · 核心代码调用链",
+  "summary": "从页面准入、上传入库、混合检索到 SSE 与刷新恢复，逐层追踪真实默认链和失败路径。",
+  "tags": [
+    "rag",
+    "工程审查",
+    "FastAPI",
+    "React",
+    "Elasticsearch"
+  ],
+  "kicker": "rag 工程审查 · 02/06 · 2026-10-13 · 37ac973 / 3c4cd2a / 56fe651",
+  "order": 6
+}
